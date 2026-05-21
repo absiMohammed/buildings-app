@@ -41,9 +41,8 @@ const char *WS_HOST   = "building-app-server.onrender.com";
 const uint16_t WS_PORT = 443;       // 443 for wss, 80 for ws
 const bool   WS_USE_TLS = true;
 
-// Building + device token (from POST /api/v1/gate/devices/provision)
-const char *BUILDING_ID  = "PASTE_BUILDING_ID_HERE";
-const char *DEVICE_TOKEN = "PASTE_DEVICE_TOKEN_HERE";
+// Permissive mode: server accepts any /ws/gate connection. Add auth
+// before deploying for real (see git history for a tokened version).
 
 // Relay
 const uint8_t  RELAY_PIN  = 0;     // GPIO0 — relay shield default
@@ -59,14 +58,7 @@ const bool     LED_ACTIVE_HIGH = false; // most ESP-01 onboard LEDs are active-l
 WebSocketsClient ws;
 uint32_t lastWifiAttemptMs = 0;
 
-static String buildWsPath() {
-  // /ws/gate?buildingId=...&token=...
-  String p = "/ws/gate?buildingId=";
-  p += BUILDING_ID;
-  p += "&token=";
-  p += DEVICE_TOKEN;
-  return p;
-}
+static const char *WS_PATH = "/ws/gate";
 
 static void setLed(bool on) {
   if (LED_PIN < 0) return;
@@ -160,10 +152,10 @@ void setup() {
   // For wss without a baked-in CA bundle we skip cert verification; the
   // device token still authenticates the connection end-to-end.
   if (WS_USE_TLS) {
-    ws.beginSSL(WS_HOST, WS_PORT, buildWsPath().c_str());
+    ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
     ws.setInsecure(); // no CA bundle on the device
   } else {
-    ws.begin(WS_HOST, WS_PORT, buildWsPath().c_str());
+    ws.begin(WS_HOST, WS_PORT, WS_PATH);
   }
   ws.onEvent(onWsEvent);
   ws.setReconnectInterval(5000);   // try again every 5s after a disconnect
