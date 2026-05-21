@@ -35,6 +35,16 @@ const BuildingSchema = new Schema(
         lng: { type: Number, default: null, min: -180, max: 180 },
       },
     },
+    // Optional ESP-01 (or similar) gate controller paired to this building.
+    // The plaintext token is shown once at provisioning; we only persist the
+    // bcrypt hash so a DB leak doesn't reveal device credentials. lastSeenAt
+    // is updated on every successful WS connect — used by the UI to show
+    // online/offline state for the gate.
+    gateDevice: {
+      tokenHash: { type: String, default: null },
+      name: { type: String, default: '' },
+      lastSeenAt: { type: Date, default: null },
+    },
   },
   { timestamps: true }
 );

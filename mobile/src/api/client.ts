@@ -5,10 +5,12 @@ import { Platform } from 'react-native';
 const ACCESS_KEY = 'ba_access';
 const REFRESH_KEY = 'ba_refresh';
 
-// Server listens on :4000 (see server/src/config/env.ts). iOS sim can hit
-// localhost; Android emulator routes the host's localhost via 10.0.2.2.
+// Dev: server listens on :4000 (server/src/config/env.ts). iOS sim hits
+// localhost; Android emulator routes host localhost via 10.0.2.2.
+// Release builds talk to the Render-hosted API.
 const DEV_HOST = Platform.select({ ios: 'http://localhost:4000', android: 'http://10.0.2.2:4000' });
-export const API_BASE_URL = `${DEV_HOST}/api/v1`;
+const PROD_HOST = 'https://building-app-server.onrender.com';
+export const API_BASE_URL = `${__DEV__ ? DEV_HOST : PROD_HOST}/api/v1`;
 
 let accessToken: string | null = null;
 let refreshToken: string | null = null;

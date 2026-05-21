@@ -1,7 +1,7 @@
-import axios from 'axios';
-
-export const GATE_TRIGGER_URL = 'http://192.168.1.150/api/gate/trigger';
+import { api } from './client';
 
 export async function triggerGate(): Promise<void> {
-  await axios.post(GATE_TRIGGER_URL, null, { timeout: 5000 });
+  // Backend forwards the trigger to the building's ESP-01 over WebSocket.
+  // The caller's JWT determines which building's gate fires.
+  await api.post('/gate/trigger', null, { timeout: 8000 });
 }

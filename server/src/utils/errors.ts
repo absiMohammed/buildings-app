@@ -18,3 +18,5 @@ export const NotFound = (msg = 'Not found') => new AppError(404, 'NOT_FOUND', ms
 export const Conflict = (msg: string) => new AppError(409, 'CONFLICT', msg);
 export const Unprocessable = (msg: string, details?: unknown) =>
   new AppError(422, 'UNPROCESSABLE', msg, details);
+export const ServiceUnavailable = (msg = 'Service unavailable') =>
+  new AppError(503, 'SERVICE_UNAVAILABLE', msg);

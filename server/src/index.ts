@@ -1,4 +1,5 @@
 import express from 'express';
+import { createServer } from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
@@ -10,6 +11,7 @@ import { connectDb } from './config/db.js';
 import { notFound, errorHandler } from './middleware/error.js';
 import { router as apiRouter } from './routes/index.js';
 import { startCronJobs } from './jobs/index.js';
+import { attachGateWebSocket } from './ws/gateWs.js';
 
 async function bootstrap(): Promise<void> {
   await connectDb();
@@ -51,7 +53,10 @@ async function bootstrap(): Promise<void> {
     startCronJobs();
   }
 
-  app.listen(env.PORT, () => {
+  const server = createServer(app);
+  attachGateWebSocket(server);
+
+  server.listen(env.PORT, () => {
     logger.info(`API listening on http://localhost:${env.PORT}`);
   });
 }

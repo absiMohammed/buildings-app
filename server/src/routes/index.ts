@@ -12,6 +12,7 @@ import { router as maintenanceRouter } from './maintenance.js';
 import { router as documentsRouter } from './documents.js';
 import { router as notificationsRouter } from './notifications.js';
 import { router as buildingsRouter } from './buildings.js';
+import { router as gateRouter } from './gate.js';
 
 export const router = Router();
 
@@ -31,3 +32,4 @@ router.use('/maintenance', maintenanceRouter);
 router.use('/documents', documentsRouter);
 router.use('/notifications', notificationsRouter);
 router.use('/buildings', buildingsRouter);
+router.use('/gate', gateRouter);
