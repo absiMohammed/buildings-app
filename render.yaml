@@ -5,7 +5,7 @@ services:
     plan: free
     region: oregon
     rootDir: .
-    buildCommand: npm ci && npm --workspace server run build
+    buildCommand: npm ci --include=dev && npm --workspace server run build
     startCommand: npm --workspace server run start
     healthCheckPath: /health
     autoDeploy: true
@@ -51,7 +51,7 @@ services:
     name: building-app-client
     runtime: static
     rootDir: .
-    buildCommand: npm ci && npm --workspace client run build
+    buildCommand: npm ci --include=dev && npm --workspace client run build
     staticPublishPath: client/dist
     autoDeploy: true
     routes:
