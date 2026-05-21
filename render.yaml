@@ -50,7 +50,6 @@ services:
   - type: web
     name: building-app-client
     runtime: static
-    plan: free
     rootDir: .
     buildCommand: npm ci && npm --workspace client run build
     staticPublishPath: client/dist
