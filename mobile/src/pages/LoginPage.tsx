@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   Alert,
+  Image,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -17,7 +18,7 @@ import {
   supportedBiometry,
   type BiometryKind,
 } from '../auth/biometric';
-import { Button, Card, IconCircle } from '../components/ui';
+import { Button, Card } from '../components/ui';
 import { palette, radii, shadow, spacing, type, textStart } from '../components/theme';
 import { useT } from '../i18n';
 import type { StringKey } from '../i18n/strings';
@@ -127,9 +128,13 @@ export function LoginPage() {
       >
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <View style={styles.hero}>
-            <IconCircle glyph="◧" tone="accent" size={56} />
-            <Text style={styles.appName}>{t('app_name')}</Text>
-            <Text style={styles.tagline}>{t('app_tagline')}</Text>
+            <Image
+              source={require('../../assets/logo-full.png')}
+              style={styles.logo}
+              resizeMode="contain"
+              accessible
+              accessibilityLabel={t('app_name')}
+            />
           </View>
 
           <Card style={styles.card}>
@@ -218,8 +223,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: spacing.xl,
   },
-  appName: { ...type.display, marginTop: spacing.md },
-  tagline: { ...type.small, textAlign: 'center', maxWidth: 280, marginTop: spacing.xs },
+  logo: { width: 240, height: 240 },
   card: { ...shadow },
   cardTitle: { marginBottom: spacing.xs },
   label: { ...type.small, color: palette.textMuted, marginTop: spacing.lg, marginBottom: spacing.xs },
