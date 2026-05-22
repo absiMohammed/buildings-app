@@ -91,7 +91,7 @@ export function InviteModal({
   const [unitId, setUnitId] = useState<string | null>(lockedUnit?._id ?? null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<{ channel: 'email' | 'sms'; inviteUrl?: string } | null>(null);
+  const [success, setSuccess] = useState<{ channel: 'email' | 'sms'; defaultPassword?: string; inviteUrl?: string } | null>(null);
   const { t, tf } = useI18n();
 
   useEffect(() => {
@@ -162,7 +162,11 @@ export function InviteModal({
       if (buildingId) body.buildingId = buildingId;
       if (markBuildingAdmin) body.isBuildingAdmin = true;
       const r = await api.post('/invites', body);
-      const out = { channel: r.data.channel as 'email' | 'sms', inviteUrl: r.data.inviteUrl as string | undefined };
+      const out = {
+        channel: r.data.channel as 'email' | 'sms',
+        defaultPassword: r.data.defaultPassword as string | undefined,
+        inviteUrl: r.data.inviteUrl as string | undefined,
+      };
       setSuccess(out);
       onInvited?.(out);
     } catch (e) {
@@ -183,15 +187,13 @@ export function InviteModal({
 
           {success ? (
             <View style={styles.successBox}>
-              <Text style={styles.successTitle}>{t('invite_sent')}</Text>
+              <Text style={styles.successTitle}>{t('invite_user_created')}</Text>
               <Text style={[type.small, { marginTop: 4 }]}>
-                {success.channel === 'email'
-                  ? tf('invite_email_sent_to', { to: trimmed })
-                  : tf('invite_share_link', { to: trimmed })}
+                {tf('invite_user_created_for', { to: trimmed })}
               </Text>
-              {success.inviteUrl ? (
+              {success.defaultPassword ? (
                 <Text style={styles.linkText} selectable>
-                  {success.inviteUrl}
+                  {tf('invite_default_password', { pwd: success.defaultPassword })}
                 </Text>
               ) : null}
               <Button label={t('done')} onPress={onClose} style={{ marginTop: spacing.md }} />

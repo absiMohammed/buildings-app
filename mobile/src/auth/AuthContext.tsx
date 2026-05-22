@@ -1,13 +1,21 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import axios from 'axios';
 import {
   api,
+  API_BASE_URL,
   clearTokens,
   getAccessToken,
+  getRefreshToken,
   loadTokens,
   setSessionExpiredHandler,
   setTokens,
 } from '../api/client';
+import {
+  disableBiometricLogin,
+  enableBiometricLogin as storeBiometricToken,
+  tryBiometricLogin,
+} from './biometric';
 import type { Capabilities } from './capabilities';
 import { EMPTY_CAPABILITIES } from './capabilities';
 
@@ -85,6 +93,14 @@ interface AuthCtx {
   building: BuildingSummary | null;
   loading: boolean;
   login(identifier: string, password: string): Promise<void>;
+  /** Prompt biometrics and sign in using the keychain-stored refresh token.
+   * Returns true on success, false if the prompt was cancelled or the
+   * stored token was rejected (in which case caller should fall back to
+   * the password form). */
+  loginWithBiometric(promptTitle: string): Promise<boolean>;
+  /** Move the current session's refresh token into the OS keychain behind
+   * biometrics so future launches can quick-unlock. */
+  enableBiometric(): Promise<void>;
   logout(): Promise<void>;
   acceptInvite(token: string, password: string, names: { firstName?: string; lastName?: string }): Promise<void>;
   refreshMe(): Promise<void>;
@@ -201,6 +217,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setSessionExpiredHandler(() => {
       applyUser(null);
+      // Refresh token is dead; the biometric-stored copy is too.
+      disableBiometricLogin().catch(() => undefined);
     });
     return () => setSessionExpiredHandler(null);
   }, []);
@@ -211,6 +229,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     applyUser(r.data.user);
   }
 
+  // Biometric login: pull the keychain-stored refresh token, exchange it
+  // for a fresh access token via /auth/refresh, then load the user. Uses
+  // plain axios (not the api instance) so the response interceptor
+  // doesn't recursively try to refresh on a 401.
+  async function loginWithBiometric(promptTitle: string): Promise<boolean> {
+    const refreshToken = await tryBiometricLogin(promptTitle);
+    if (!refreshToken) return false;
+    try {
+      const r = await axios.post(`${API_BASE_URL}/auth/refresh`, { refreshToken });
+      // Refresh endpoint may rotate the refresh token; if it doesn't,
+      // keep the one we just used.
+      await setTokens(r.data.accessToken, r.data.refreshToken ?? refreshToken);
+      await refreshMe();
+      return true;
+    } catch {
+      // Token rejected — most likely revoked or expired. Clear the
+      // keychain so the user isn't stuck offering an invalid credential.
+      await disableBiometricLogin();
+      return false;
+    }
+  }
+
+  async function enableBiometric(): Promise<void> {
+    const rt = getRefreshToken();
+    if (!rt) throw new Error('No active session');
+    await storeBiometricToken(rt);
+  }
+
   async function logout() {
     try {
       await api.post('/auth/logout');
@@ -218,6 +264,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       /* noop */
     }
     await clearTokens();
+    await disableBiometricLogin();
     applyUser(null);
   }
 
@@ -243,6 +290,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         building,
         loading,
         login,
+        loginWithBiometric,
+        enableBiometric,
         logout,
         acceptInvite,
         refreshMe,

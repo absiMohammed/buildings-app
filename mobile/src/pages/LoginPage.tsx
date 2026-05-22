@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -11,12 +12,18 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../auth/AuthContext';
+import {
+  hasBiometricCredentials,
+  supportedBiometry,
+  type BiometryKind,
+} from '../auth/biometric';
 import { Button, Card, IconCircle } from '../components/ui';
 import { palette, radii, shadow, spacing, type, textStart } from '../components/theme';
 import { useT } from '../i18n';
+import type { StringKey } from '../i18n/strings';
 
 export function LoginPage() {
-  const { login } = useAuth();
+  const { login, loginWithBiometric, enableBiometric } = useAuth();
   const t = useT();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
@@ -24,12 +31,75 @@ export function LoginPage() {
   const [touched, setTouched] = useState<{ identifier?: boolean; password?: boolean }>({});
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [biometry, setBiometry] = useState<BiometryKind>(null);
+  const [biometricEnrolled, setBiometricEnrolled] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [kind, enrolled] = await Promise.all([
+        supportedBiometry(),
+        hasBiometricCredentials(),
+      ]);
+      if (cancelled) return;
+      setBiometry(kind);
+      setBiometricEnrolled(enrolled);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function biometricLabelKey(kind: BiometryKind): StringKey {
+    return kind === 'face' ? 'biometric_sign_in_face' : 'biometric_sign_in_fingerprint';
+  }
+
+  async function onBiometricSubmit() {
+    setError(null);
+    const ok = await loginWithBiometric(t('biometric_prompt_title'));
+    if (!ok) {
+      // Stored token was rejected (revoked/expired) — keychain has been
+      // cleared, so hide the button and force a password login.
+      setBiometricEnrolled(false);
+      setError(t('sign_in_failed'));
+    }
+  }
+
+  async function maybePromptEnrollment() {
+    if (!biometry || biometricEnrolled) return;
+    const messageKey: StringKey =
+      biometry === 'face'
+        ? 'biometric_enroll_message_face'
+        : 'biometric_enroll_message_fingerprint';
+    await new Promise<void>((resolve) => {
+      Alert.alert(
+        t('biometric_enroll_title'),
+        t(messageKey),
+        [
+          { text: t('biometric_enroll_no'), style: 'cancel', onPress: () => resolve() },
+          {
+            text: t('biometric_enroll_yes'),
+            onPress: async () => {
+              try {
+                await enableBiometric();
+                setBiometricEnrolled(true);
+              } catch {
+                /* user cancelled the system prompt — fine */
+              }
+              resolve();
+            },
+          },
+        ],
+        { cancelable: true, onDismiss: () => resolve() }
+      );
+    });
+  }
 
   const trimmed = identifier.trim();
   const looksLikeEmail = /.+@.+\..+/.test(trimmed);
   const looksLikePhone = /^\+?[0-9\s\-()]{6,}$/.test(trimmed);
   const identifierValid = looksLikeEmail || looksLikePhone;
-  const passwordLongEnough = password.length >= 8;
+  const passwordLongEnough = password.length >= 3;
   const canSubmit = identifierValid && passwordLongEnough && !submitting;
 
   async function onSubmit() {
@@ -37,26 +107,16 @@ export function LoginPage() {
     setSubmitting(true);
     try {
       await login(trimmed, password);
+      // Offer enrollment after a successful password login. We resolve the
+      // alert promise before this function exits so the loading state
+      // stays accurate.
+      await maybePromptEnrollment();
     } catch (err) {
       const msg = (err as { response?: { data?: { error?: { message?: string } } } })?.response?.data?.error?.message;
       setError(msg ?? t('sign_in_failed'));
     } finally {
       setSubmitting(false);
     }
-  }
-
-  const demoAccounts = [
-    { role: t('role_admin'),     identifier: 'admin@example.com',     tone: '#4f46e5' },
-    { role: t('role_owner'),     identifier: 'owner@example.com',     tone: '#059669' },
-    { role: t('role_renter'),    identifier: '+972500000003',          tone: '#d97706' },
-    { role: t('role_dependent'), identifier: 'dependent@example.com', tone: '#64748b' },
-  ] as const;
-
-  function fillDemo(account: typeof demoAccounts[number]) {
-    setIdentifier(account.identifier);
-    setPassword('ChangeMe!123');
-    setTouched({ identifier: true, password: true });
-    setError(null);
   }
 
   return (
@@ -131,31 +191,16 @@ export function LoginPage() {
               style={styles.submit}
             />
 
-            <View style={styles.demoBlock}>
-              <Text style={styles.demoHeader}>{t('try_demo_account')}</Text>
-              <View style={styles.demoRow}>
-                {demoAccounts.map((a) => {
-                  const active = identifier === a.identifier;
-                  return (
-                    <TouchableOpacity
-                      key={a.identifier}
-                      onPress={() => fillDemo(a)}
-                      activeOpacity={0.85}
-                      style={[
-                        styles.demoChip,
-                        { borderColor: a.tone },
-                        active && { backgroundColor: a.tone },
-                      ]}
-                    >
-                      <Text style={[styles.demoChipText, { color: active ? '#fff' : a.tone }]}>
-                        {a.role}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-              <Text style={styles.demoHint}>{t('tap_to_fill_demo')}</Text>
-            </View>
+            {biometricEnrolled && biometry ? (
+              <TouchableOpacity
+                onPress={onBiometricSubmit}
+                activeOpacity={0.85}
+                style={styles.biometricBtn}
+              >
+                <Text style={styles.biometricGlyph}>{biometry === 'face' ? '◉' : '◍'}</Text>
+                <Text style={styles.biometricLabel}>{t(biometricLabelKey(biometry))}</Text>
+              </TouchableOpacity>
+            ) : null}
           </Card>
 
           <Text style={styles.footnote}>{t('new_users_invite_only')}</Text>
@@ -202,35 +247,15 @@ const styles = StyleSheet.create({
   },
   errorText: { color: palette.danger, fontSize: 13 },
   submit: { marginTop: spacing.lg },
-  demoBlock: {
-    marginTop: spacing.lg,
-    paddingTop: spacing.md,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: palette.divider,
-  },
-  demoHeader: {
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-    color: palette.textSubtle,
-    textAlign: 'center',
-  },
-  demoRow: {
+  biometricBtn: {
+    marginTop: spacing.md,
+    paddingVertical: spacing.sm,
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
+    alignItems: 'center',
     justifyContent: 'center',
-    marginTop: spacing.sm,
+    gap: spacing.sm,
   },
-  demoChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: radii.pill,
-    borderWidth: 1,
-    backgroundColor: 'transparent',
-  },
-  demoChipText: { fontSize: 12, fontWeight: '600' },
-  demoHint: { ...type.small, textAlign: 'center', marginTop: spacing.sm, fontSize: 11 },
+  biometricGlyph: { fontSize: 18, color: palette.accent },
+  biometricLabel: { fontSize: 14, fontWeight: '600', color: palette.accent },
   footnote: { ...type.small, textAlign: 'center', marginTop: spacing.xl },
 });

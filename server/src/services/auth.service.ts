@@ -13,11 +13,8 @@ import {
   signRefreshToken,
   type AccessTokenPayload,
 } from '../utils/jwt.js';
-import { sendEmail, buildInviteUrl } from '../utils/email.js';
 import { BadRequest, Conflict, NotFound, Unauthorized, Forbidden } from '../utils/errors.js';
 import type { Role } from '../../../shared/types.js';
-
-const INVITE_TTL_DAYS = 7;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -103,19 +100,29 @@ interface CreateInviteArgs {
 }
 
 export interface CreateInviteResult {
+  /** Always true — the user is created and ready to log in immediately. */
   sent: true;
   channel: 'email' | 'sms';
-  expiresAt: Date;
-  inviteUrl: string;
+  /** The default password the admin should share with the new user. */
+  defaultPassword: string;
 }
 
+/**
+ * The notification stack (email/SMS) isn't wired up, so we skip the
+ * pending-invite flow entirely: the new user is created as `active` with
+ * a known default password (`password`). The admin shares those creds out
+ * of band. The user can change the password later from their profile.
+ *
+ * The name `createInvite` is kept for backwards compat with the existing
+ * mobile/web POST /invites callers, even though no invite token is
+ * actually created.
+ */
 export async function createInvite(args: CreateInviteArgs): Promise<CreateInviteResult> {
   if (!args.email && !args.phone) throw BadRequest('email or phone is required');
 
   const email = args.email?.toLowerCase().trim() || null;
   const phone = args.phone ? normalizePhone(args.phone) : null;
 
-  // Lookup an existing user by whichever identifier was supplied.
   const lookup: Record<string, string> = {};
   if (email) lookup.email = email;
   if (phone) lookup.phone = phone;
@@ -124,77 +131,38 @@ export async function createInvite(args: CreateInviteArgs): Promise<CreateInvite
     : phone
       ? await User.findOne({ phone })
       : null;
+  if (existing) throw Conflict('A user with this contact already exists');
 
-  if (existing && existing.status === 'active')
-    throw Conflict('A user with this contact already exists');
-
-  // unitId is required for every invite EXCEPT the system-admin appointing
-  // the building admin (an owner with `isBuildingAdmin: true`). That one
-  // path runs before any units exist for the building, so the owner shell
-  // is created with `unitId: null` and the new admin sets up units after
-  // accepting. Every other role (regular owner, renter, dependent) is
-  // unit-scoped and must come with one.
-  const appointingBuildingAdmin =
-    args.role === 'owner' && !!args.isBuildingAdmin;
+  // unitId is required EXCEPT when the system admin appoints the
+  // building admin before any units exist (`isBuildingAdmin: true`).
+  const appointingBuildingAdmin = args.role === 'owner' && !!args.isBuildingAdmin;
   if (!appointingBuildingAdmin && !args.unitId) {
     throw BadRequest('unitId is required for non-admin invites');
   }
-
   if (args.unitId) {
     const unit = await Unit.findById(args.unitId);
     if (!unit) throw NotFound('Unit not found');
   }
 
-  const rawToken = randomToken(32);
-  const tokenHash = sha256(rawToken);
-  const expiresAt = new Date(Date.now() + INVITE_TTL_DAYS * 86400 * 1000);
+  const defaultPassword = 'password';
+  const passwordHash = await hashPassword(defaultPassword);
 
-  await InviteToken.create({
-    email,
-    phone,
+  // Synthetic email for phone-only users — the User schema requires a
+  // unique non-null email and a single placeholder collides across users.
+  const synthEmail = email ?? `phone+${phone?.replace(/[^0-9]/g, '')}@invite.local`;
+  await User.create({
+    email: synthEmail,
+    phone: phone ?? '',
+    passwordHash,
     role: args.role,
     buildingId: args.buildingId,
     unitId: args.unitId ?? null,
     linkedOwnerId: args.linkedOwnerId ?? null,
-    invitedBy: args.invitedBy,
-    tokenHash,
-    expiresAt,
+    status: 'active',
+    isBuildingAdmin: args.role === 'owner' ? !!args.isBuildingAdmin : false,
   });
 
-  // Pre-create a stub User if not present so other features can ref them.
-  // We need at least one contact to identify them; build a synthetic email
-  // for phone-only invites so the unique email index isn't violated by
-  // multiple nulls.
-  if (!existing) {
-    const synthEmail = email ?? `phone+${phone?.replace(/[^0-9]/g, '')}@invite.local`;
-    await User.create({
-      email: synthEmail,
-      phone: phone ?? '',
-      role: args.role,
-      buildingId: args.buildingId,
-      unitId: args.unitId ?? null,
-      linkedOwnerId: args.linkedOwnerId ?? null,
-      status: 'invited',
-      // Only honored for owner invites; the route enforces caller==admin
-      // and the single-building-admin rule before this point.
-      isBuildingAdmin: args.role === 'owner' ? !!args.isBuildingAdmin : false,
-    });
-  }
-
-  const url = buildInviteUrl(rawToken);
-  if (email) {
-    await sendEmail({
-      to: email,
-      subject: "You're invited to the Building App",
-      html: `<p>You have been invited as a <b>${args.role}</b>.</p>
-             <p><a href="${url}">Accept the invite</a> (link expires in ${INVITE_TTL_DAYS} days).</p>`,
-      text: `Accept your invite: ${url}`,
-    });
-  }
-  // Phone-only invites: no SMS provider wired in this demo; the URL is in
-  // the response so the admin can share it manually.
-
-  return { sent: true, channel: email ? 'email' : 'sms', expiresAt, inviteUrl: url };
+  return { sent: true, channel: email ? 'email' : 'sms', defaultPassword };
 }
 
 export async function acceptInvite(rawToken: string, password: string, names: { firstName?: string; lastName?: string; phone?: string }) {
