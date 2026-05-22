@@ -1,7 +1,7 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Server as HttpServer, IncomingMessage } from 'http';
 import { logger } from '../config/logger.js';
-import { registerDevice, unregisterDevice } from '../services/gateHub.js';
+import { registerDevice, setDoorState, unregisterDevice } from '../services/gateHub.js';
 
 const WS_PATH = '/ws/gate';
 const HEARTBEAT_MS = 30_000;
@@ -35,7 +35,19 @@ export function attachGateWebSocket(server: HttpServer): void {
     }, HEARTBEAT_MS);
 
     ws.on('pong', () => { alive = true; });
-    ws.on('message', () => { alive = true; });
+    ws.on('message', (raw) => {
+      alive = true;
+      try {
+        const msg = JSON.parse(raw.toString()) as { type?: string; state?: string };
+        if (msg.type === 'door_state' && (msg.state === 'open' || msg.state === 'closed')) {
+          setDoorState(msg.state);
+        }
+      } catch {
+        // Non-JSON messages (e.g. plain pings from a future device)
+        // are ignored — they still count as activity for the
+        // heartbeat above.
+      }
+    });
     ws.on('close', () => {
       clearInterval(heartbeat);
       unregisterDevice(ws);
