@@ -13,6 +13,7 @@ import { BottomSheet } from './BottomSheet';
 import { useT } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 import { fetchGateStatus, triggerGate, type DoorState } from '../api/gate';
+import { unlockDoor } from '../api/door';
 
 type TapPhase = 'idle' | 'busy' | 'done' | 'error' | 'skipped';
 const GATE_STATUS_POLL_MS = 5000;
@@ -82,6 +83,8 @@ export function QuickActionsModal({
         ctaKey="qa_door_cta"
         busyKey="qa_door_opening"
         doneKey="qa_door_opened"
+        errorKey="qa_gate_error"
+        onPress={unlockDoor}
       />
 
       <TapActionCard
@@ -89,11 +92,20 @@ export function QuickActionsModal({
         tone={['#475569', '#64748b']}
         titleKey="qa_gate_title"
         hintKey="qa_gate_hint"
-        ctaKey="qa_gate_cta"
-        busyKey="qa_gate_opening"
-        doneKey="qa_gate_opened"
+        // Label + status strings flip based on the live door state from
+        // the reed switch — pressing the button always pulses the relay
+        // (a "toggle" on the controller), the wording just describes
+        // what's about to happen.
+        ctaKey={
+          doorState === 'open'
+            ? 'qa_gate_cta_close'
+            : doorState === 'closed'
+              ? 'qa_gate_cta_open'
+              : 'qa_gate_cta'
+        }
+        busyKey={doorState === 'open' ? 'qa_gate_closing' : 'qa_gate_opening'}
+        doneKey={doorState === 'open' ? 'qa_gate_closed' : 'qa_gate_opened'}
         errorKey="qa_gate_error"
-        skippedKey="qa_gate_already_open"
         statusBadge={
           gateOnline
             ? doorState === 'open'

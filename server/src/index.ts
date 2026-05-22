@@ -12,6 +12,7 @@ import { notFound, errorHandler } from './middleware/error.js';
 import { router as apiRouter } from './routes/index.js';
 import { startCronJobs } from './jobs/index.js';
 import { attachGateWebSocket } from './ws/gateWs.js';
+import { attachDoorWebSocket } from './ws/doorWs.js';
 
 async function bootstrap(): Promise<void> {
   await connectDb();
@@ -55,6 +56,7 @@ async function bootstrap(): Promise<void> {
 
   const server = createServer(app);
   attachGateWebSocket(server);
+  attachDoorWebSocket(server);
 
   server.listen(env.PORT, () => {
     logger.info(`API listening on http://localhost:${env.PORT}`);

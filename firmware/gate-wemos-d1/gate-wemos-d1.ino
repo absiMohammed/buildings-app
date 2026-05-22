@@ -75,9 +75,19 @@ static inline void setLed(bool on) {
   digitalWrite(LED_PIN, on ? LOW : HIGH); // active-low onboard LED
 }
 
-// Relay helpers (active-low module — drive LOW to engage)
-static inline void relayOff() { digitalWrite(RELAY_PIN, HIGH); }
-static inline void relayOn()  { digitalWrite(RELAY_PIN, LOW);  }
+// Relay helpers — open-drain style. The 5V opto-isolator on this
+// "active-low" module doesn't fully turn off when IN is driven to 3.3V
+// (Wemos GPIO HIGH); the ~1.7V drop across the opto LED keeps it
+// partially conducting and the relay stays engaged. So instead of
+// digitalWrite HIGH for "off", we set the pin to high-Z (INPUT) and
+// let the module's own 5V rail pull IN up to 5V — that's enough to
+// fully close the opto's input. To engage, we switch the pin back to
+// OUTPUT LOW and sink the opto's drive current to GND.
+static inline void relayOff() { pinMode(RELAY_PIN, INPUT); }
+static inline void relayOn()  {
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+}
 
 static void pulseRelay() {
   Serial.println(F("[gate] trigger -> pulse relay"));

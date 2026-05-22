@@ -9,14 +9,9 @@ export const router = Router();
 // requests without a JWT still 401.
 router.post('/trigger', (_req, res, next) => {
   try {
-    // Reed switch says the gate is already open — no point pulsing the
-    // contactor again. Returning 200 with a skipped flag keeps the
-    // mobile happy-path code while letting the UI swap its busy/done
-    // pill for a "already open" one.
-    if (getDoorState() === 'open') {
-      res.json({ ok: true, skipped: true, reason: 'already_open' });
-      return;
-    }
+    // Mobile now labels the button "Open gate" or "Close gate" based on
+    // the reed-derived doorState, so each press is an explicit toggle
+    // intent — always pulse the relay, no skip logic.
     const ok = sendTrigger();
     if (!ok) throw ServiceUnavailable('Gate device offline');
     res.json({ ok: true });

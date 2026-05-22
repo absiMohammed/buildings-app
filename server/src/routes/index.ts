@@ -13,6 +13,7 @@ import { router as documentsRouter } from './documents.js';
 import { router as notificationsRouter } from './notifications.js';
 import { router as buildingsRouter } from './buildings.js';
 import { router as gateRouter } from './gate.js';
+import { router as doorRouter } from './door.js';
 
 export const router = Router();
 
@@ -33,3 +34,4 @@ router.use('/documents', documentsRouter);
 router.use('/notifications', notificationsRouter);
 router.use('/buildings', buildingsRouter);
 router.use('/gate', gateRouter);
+router.use('/door', doorRouter);
