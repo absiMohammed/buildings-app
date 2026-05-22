@@ -1,6 +1,13 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { api, clearTokens, getAccessToken, loadTokens, setTokens } from '../api/client';
+import {
+  api,
+  clearTokens,
+  getAccessToken,
+  loadTokens,
+  setSessionExpiredHandler,
+  setTokens,
+} from '../api/client';
 import type { Capabilities } from './capabilities';
 import { EMPTY_CAPABILITIES } from './capabilities';
 
@@ -186,6 +193,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await loadTokens();
       await refreshMe();
     })();
+  }, []);
+
+  // When the API client's refresh attempt fails (refresh token expired,
+  // revoked, or never existed), drop the user state. RootNavigator gates
+  // on `user`, so this flips the UI back to the login stack instantly.
+  useEffect(() => {
+    setSessionExpiredHandler(() => {
+      applyUser(null);
+    });
+    return () => setSessionExpiredHandler(null);
   }, []);
 
   async function login(identifier: string, password: string) {

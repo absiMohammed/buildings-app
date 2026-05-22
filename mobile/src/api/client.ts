@@ -1,16 +1,12 @@
 import axios, { AxiosError } from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
 
 const ACCESS_KEY = 'ba_access';
 const REFRESH_KEY = 'ba_refresh';
 
-// Dev: server listens on :4000 (server/src/config/env.ts). iOS sim hits
-// localhost; Android emulator routes host localhost via 10.0.2.2.
-// Release builds talk to the Render-hosted API.
-const DEV_HOST = Platform.select({ ios: 'http://localhost:4000', android: 'http://10.0.2.2:4000' });
-const PROD_HOST = 'https://building-app-server.onrender.com';
-export const API_BASE_URL = `${__DEV__ ? DEV_HOST : PROD_HOST}/api/v1`;
+// Always talk to the deployed Render backend, dev and release alike.
+// To point at a local server, change the host below temporarily.
+export const API_BASE_URL = 'https://building-app-server.onrender.com/api/v1';
 
 let accessToken: string | null = null;
 let refreshToken: string | null = null;
@@ -43,6 +39,15 @@ export async function clearTokens(): Promise<void> {
   accessToken = null;
   refreshToken = null;
   await AsyncStorage.multiRemove([ACCESS_KEY, REFRESH_KEY]);
+}
+
+// AuthContext registers a listener here so it can drop its `user` state
+// when the response interceptor gives up on refresh. Without this, the
+// app stays on the logged-in stack even though every subsequent request
+// 401s.
+let onSessionExpired: (() => void) | null = null;
+export function setSessionExpiredHandler(fn: (() => void) | null): void {
+  onSessionExpired = fn;
 }
 
 export const api = axios.create({
@@ -84,6 +89,7 @@ api.interceptors.response.use(
         return api.request(original);
       } catch {
         await clearTokens();
+        onSessionExpired?.();
       }
     }
     return Promise.reject(err);

@@ -33,8 +33,8 @@
 // ─── Configuration ────────────────────────────────────────────────────────
 
 // Wi-Fi
-const char *WIFI_SSID     = "YourWiFiSSID";
-const char *WIFI_PASSWORD = "YourWiFiPassword";
+const char *WIFI_SSID     = "Absi's Home";
+const char *WIFI_PASSWORD = "Absi@123#";
 
 // Backend (Render)
 const char *WS_HOST   = "building-app-server.onrender.com";
@@ -149,11 +149,10 @@ void setup() {
   connectWifi();
 
   // Render terminates TLS — use ws.beginSSL for wss://, ws.begin for ws://.
-  // For wss without a baked-in CA bundle we skip cert verification; the
-  // device token still authenticates the connection end-to-end.
+  // beginSSL with no fingerprint defaults to insecure on ESP8266, which
+  // is fine for now: traffic is still encrypted, just not pinned.
   if (WS_USE_TLS) {
     ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
-    ws.setInsecure(); // no CA bundle on the device
   } else {
     ws.begin(WS_HOST, WS_PORT, WS_PATH);
   }

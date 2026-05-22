@@ -25,9 +25,9 @@ services:
       - key: JWT_REFRESH_SECRET
         generateValue: true
       - key: JWT_ACCESS_TTL
-        value: 15m
-      - key: JWT_REFRESH_TTL
         value: 30d
+      - key: JWT_REFRESH_TTL
+        value: 90d
       - key: BCRYPT_COST
         value: "12"
       - key: EMAIL_PROVIDER
