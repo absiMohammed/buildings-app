@@ -21,5 +21,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*", "../shared/**/*"],
-  "exclude": ["dist", "node_modules", "tests", "src/scripts"]
+  "exclude": ["dist", "node_modules", "tests"]
 }

@@ -14,7 +14,7 @@ import LinearGradient from 'react-native-linear-gradient';
 import { BarChart, PieChart } from 'react-native-gifted-charts';
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
-import { Card, EmptyState, SectionHeader } from '../components/ui';
+import { Card, EmptyState, Notice, SectionHeader } from '../components/ui';
 import { palette, radii, shadow, spacing, type } from '../components/theme';
 import { TAB_BAR_HEIGHT } from '../components/BottomTabBar';
 import { useI18n } from '../i18n';
@@ -56,6 +56,7 @@ const ROLE_KEY: Record<Role, StringKey> = {
   owner: 'role_owner',
   renter: 'role_renter',
   dependent: 'role_dependent',
+  independent: 'role_independent',
 };
 
 const ROLE_COLOR: Record<Role, string> = {
@@ -63,6 +64,7 @@ const ROLE_COLOR: Record<Role, string> = {
   owner: palette.success,
   renter: palette.warning,
   dependent: palette.textSubtle,
+  independent: palette.textMuted,
 };
 
 /**
@@ -108,7 +110,7 @@ export function AdminDashboardPage() {
   const pieData = useMemo(() => {
     if (!stats) return [];
     const r = stats.users.byRole;
-    return (['owner', 'renter', 'dependent', 'admin'] as Role[])
+    return (['owner', 'renter', 'dependent'] as const)
       .map((role) => ({
         value: r[role],
         color: ROLE_COLOR[role],
@@ -144,7 +146,7 @@ export function AdminDashboardPage() {
     return (
       <SafeAreaView style={styles.center} edges={['top']}>
         <EmptyState
-          icon="📊"
+          iconName="buildings"
           title={t('admin_dash_err_load')}
           body={error ?? ''}
           action={{ label: t('back'), onPress: () => void fetch() }}
@@ -204,14 +206,14 @@ export function AdminDashboardPage() {
               inactive: stats.buildings.inactive,
             })}
             tone="accent"
-            onPress={() => navigation.navigate('Buildings')}
+            onPress={() => navigation.getParent()?.navigate('BuildingsTab' as never)}
           />
           <StatCard
             label={t('admin_dash_stat_users')}
             value={String(stats.users.total)}
             hint={tf('admin_dash_stat_users_hint', { admins: stats.users.buildingAdmins })}
             tone="positive"
-            onPress={() => navigation.navigate('AllUsers')}
+            onPress={() => navigation.getParent()?.navigate('AllUsersTab' as never)}
           />
           <StatCard
             label={t('admin_dash_stat_units')}
@@ -228,26 +230,31 @@ export function AdminDashboardPage() {
         </View>
 
         {needsAttention > 0 && (
-          <Card>
-            <Text style={[type.body, { fontWeight: '700', marginBottom: spacing.sm }]}>
-              {t('admin_dash_attention_title')}
-            </Text>
-            {stats.buildings.withoutAdmin > 0 && (
-              <AttentionRow
-                label={tf('admin_dash_attention_no_admin', { n: stats.buildings.withoutAdmin })}
-                onPress={() => navigation.navigate('Buildings')}
-              />
-            )}
-            {stats.buildings.inactive > 0 && (
-              <AttentionRow
-                label={tf('admin_dash_attention_inactive', { n: stats.buildings.inactive })}
-                onPress={() => navigation.navigate('Buildings')}
-              />
-            )}
-            {stats.invites.pending > 0 && (
-              <AttentionRow label={tf('admin_dash_attention_invites', { n: stats.invites.pending })} />
-            )}
-          </Card>
+          <>
+            <SectionHeader title={t('admin_dash_attention_title')} />
+            <View style={styles.attentionList}>
+              {stats.buildings.withoutAdmin > 0 && (
+                <Notice
+                  tone="warning"
+                  message={tf('admin_dash_attention_no_admin', { n: stats.buildings.withoutAdmin })}
+                  onPress={() => navigation.getParent()?.navigate('BuildingsTab' as never)}
+                />
+              )}
+              {stats.buildings.inactive > 0 && (
+                <Notice
+                  tone="warning"
+                  message={tf('admin_dash_attention_inactive', { n: stats.buildings.inactive })}
+                  onPress={() => navigation.getParent()?.navigate('BuildingsTab' as never)}
+                />
+              )}
+              {stats.invites.pending > 0 && (
+                <Notice
+                  tone="info"
+                  message={tf('admin_dash_attention_invites', { n: stats.invites.pending })}
+                />
+              )}
+            </View>
+          </>
         )}
 
         {revenue && (
@@ -290,7 +297,7 @@ export function AdminDashboardPage() {
                         {b.name}
                       </Text>
                       <Text style={[type.body, { fontWeight: '700' }]}>
-                        {fmtMoney(b.annual, revenue.buildings[0]?.currency ?? 'USD')}
+                        {fmtMoney(b.annual, 'USD')}
                       </Text>
                     </View>
                   ))}
@@ -428,29 +435,12 @@ function RevenueTile({
   );
 }
 
-function AttentionRow({ label, onPress }: { label: string; onPress?: () => void }) {
-  const inner = (
-    <View style={styles.attentionRow}>
-      <Text style={[type.body, { flex: 1 }]} numberOfLines={2}>
-        {label}
-      </Text>
-      {onPress ? <Text style={styles.chevron}>›</Text> : null}
-    </View>
-  );
-  if (!onPress) return inner;
-  return (
-    <TouchableOpacity onPress={onPress} activeOpacity={0.85}>
-      {inner}
-    </TouchableOpacity>
-  );
-}
-
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: palette.bg },
-  scroll: { paddingBottom: spacing.xl },
+  scroll: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   heroWrap: {
-    margin: spacing.lg,
+    marginVertical: spacing.lg,
     padding: spacing.lg,
     borderRadius: 24,
     overflow: 'hidden',
@@ -495,7 +485,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
   },
   statTile: {
     flexBasis: '48%',
@@ -513,13 +502,7 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   legendDot: { width: 10, height: 10, borderRadius: 5 },
 
-  attentionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: spacing.sm,
-  },
-  chevron: { color: palette.textSubtle, fontSize: 22, fontWeight: '300' },
+  attentionList: { gap: spacing.sm, marginBottom: spacing.lg },
   revenueGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',

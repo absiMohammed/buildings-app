@@ -3,6 +3,10 @@ import axios, { AxiosError } from 'axios';
 const ACCESS_KEY = 'ba_access';
 const REFRESH_KEY = 'ba_refresh';
 
+// Absolute API URL in production (set at build time via VITE_API_URL); falls
+// back to the relative path so the Vite dev proxy still works locally.
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '/api/v1';
+
 export function getAccessToken(): string | null {
   return localStorage.getItem(ACCESS_KEY);
 }
@@ -23,7 +27,7 @@ export function clearTokens(): void {
 }
 
 export const api = axios.create({
-  baseURL: '/api/v1',
+  baseURL: API_BASE,
   headers: { 'Content-Type': 'application/json' },
 });
 
@@ -38,9 +42,10 @@ let refreshing: Promise<string> | null = null;
 async function refreshAccess(): Promise<string> {
   const refresh = getRefreshToken();
   if (!refresh) throw new Error('No refresh token');
-  const res = await axios.post('/api/v1/auth/refresh', { refreshToken: refresh });
+  const res = await axios.post(`${API_BASE}/auth/refresh`, { refreshToken: refresh });
   const access = res.data.accessToken as string;
-  setTokens(access);
+  // Persist a rotated refresh token if the server issued one.
+  setTokens(access, (res.data.refreshToken as string | undefined) ?? refresh);
   return access;
 }
 

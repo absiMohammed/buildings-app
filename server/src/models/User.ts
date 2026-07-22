@@ -1,6 +1,7 @@
 import { Schema, model, type InferSchemaType, type HydratedDocument, Types } from 'mongoose';
 
-const ROLES = ['admin', 'owner', 'renter', 'dependent'] as const;
+const BUILDING_ROLES = ['owner', 'renter', 'dependent', 'independent'] as const;
+const SYSTEM_ROLES = ['admin', 'member'] as const;
 const STATUSES = ['invited', 'active', 'suspended'] as const;
 const GEO_ACTIONS = ['open_gate', 'close_gate', 'open_door', 'call_elevator'] as const;
 
@@ -14,64 +15,47 @@ const GeoFenceSchema = new Schema(
   { _id: false }
 );
 
-// Per-user policy & quota knobs configurable by the admin. Each subfield is
-// optional; null/undefined means "use the building default (or unlimited
-// where no default exists)". Keep this open-ended via `custom` so the admin
-// can attach arbitrary key/value preferences without a model migration.
 const UserSettingsSchema = new Schema(
   {
-    // Cap on how many dependents this user (owner or renter) is allowed
-    // to invite into their unit. null = unlimited. Admin role ignores this.
     maxDependents: { type: Number, default: null, min: 0 },
-    // Recurring monthly utility lines that this user owes on top of dues.
-    // Keyed by free-form utility name (e.g. "electricity", "internet").
     monthlyUtilities: { type: Map, of: Number, default: undefined },
     geoFence: { type: GeoFenceSchema, default: undefined },
-    // Free-form admin-set preferences. Stored as strings to keep the API
-    // simple; richer types can live in dedicated fields when justified.
     custom: { type: Map, of: String, default: undefined },
+  },
+  { _id: false }
+);
+
+// A single building relationship. A user can hold several of these — across
+// different buildings, and each may cover multiple units. `independent`
+// memberships (guard/staff) carry a building but no units.
+const MembershipSchema = new Schema(
+  {
+    buildingId: { type: Schema.Types.ObjectId, ref: 'Building', required: true, index: true },
+    role: { type: String, enum: BUILDING_ROLES, required: true },
+    unitIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Unit' }], default: [] },
+    isBuildingAdmin: { type: Boolean, default: false },
+    // For dependents: the owner/renter they belong to within this building.
+    linkedOwnerId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
   },
   { _id: false }
 );
 
 const UserSchema = new Schema(
   {
-    email: { type: String, required: true, lowercase: true, trim: true, unique: true, index: true },
+    // Phone is the login identity and is globally unique. Email is optional.
+    phone: { type: String, required: true, unique: true, index: true, trim: true },
+    email: { type: String, lowercase: true, trim: true, default: null },
     passwordHash: { type: String, default: null },
+    mustChangePassword: { type: Boolean, default: false },
     firstName: { type: String, default: '' },
     lastName: { type: String, default: '' },
-    phone: { type: String, default: '' },
-    role: { type: String, enum: ROLES, required: true },
-    // System admins (`role === 'admin'`) are NOT attached to any building:
-    // they CRUD buildings and assign building admins across the whole
-    // system. Every other role MUST belong to a specific building.
-    buildingId: {
-      type: Schema.Types.ObjectId,
-      ref: 'Building',
-      default: null,
-      index: true,
-      validate: {
-        validator(this: { role?: string }, v: unknown) {
-          if (this.role === 'admin') return true;
-          return v != null;
-        },
-        message: 'buildingId is required for non-admin roles',
-      },
-    },
-    unitId: { type: Schema.Types.ObjectId, ref: 'Unit', default: null },
-    linkedOwnerId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
-    // Building-admin flag — only meaningful when `role === 'owner'`. When
-    // true, the owner can switch to "admin view" in the mobile UI and is
-    // granted the building-management capability set on top of owner caps.
-    // A building has at most one owner with this flag set (enforced at the
-    // appointment endpoint, not at the schema level).
-    isBuildingAdmin: { type: Boolean, default: false, index: true },
+    // System-level role. 'admin' = application super-admin (no memberships);
+    // 'member' = normal user whose per-building roles live in `memberships`.
+    systemRole: { type: String, enum: SYSTEM_ROLES, default: 'member', index: true },
+    // Every non-super-admin belongs to at least one building via a membership.
+    memberships: { type: [MembershipSchema], default: [] },
     status: { type: String, enum: STATUSES, default: 'invited', index: true },
     refreshTokenHash: { type: String, default: null },
-    // Wall-clock cutoff for live session validity. Access tokens whose
-    // `iat` claim is older than this timestamp are rejected by the auth
-    // middleware. Bumped on logout-all and on admin suspension so revocation
-    // is immediate, not deferred until the JWT's natural expiry.
     sessionsRevokedAt: { type: Date, default: null },
     lastLoginAt: { type: Date, default: null },
     settings: { type: UserSettingsSchema, default: () => ({}) },
@@ -81,7 +65,8 @@ const UserSchema = new Schema(
 
 export const GEO_FENCE_ACTIONS = GEO_ACTIONS;
 
-UserSchema.index({ buildingId: 1, role: 1 });
+// Email uniqueness only among users that actually have one.
+UserSchema.index({ email: 1 }, { unique: true, partialFilterExpression: { email: { $type: 'string' } } });
 
 UserSchema.set('toJSON', {
   transform: (_doc, ret) => {
@@ -94,4 +79,48 @@ UserSchema.set('toJSON', {
 
 export type UserType = InferSchemaType<typeof UserSchema> & { _id: Types.ObjectId };
 export type UserDoc = HydratedDocument<UserType>;
+export type MembershipType = UserType['memberships'][number];
+
+/** The FIRST membership matching `buildingId` (and `role` if given), or undefined. */
+export function membershipFor(
+  user: UserType,
+  buildingId: string | Types.ObjectId | null | undefined,
+  role?: string,
+) {
+  if (!buildingId) return undefined;
+  const target = String(buildingId);
+  return user.memberships.find(
+    (m) => String(m.buildingId) === target && (role === undefined || m.role === role),
+  );
+}
+
+/** Every membership the user holds in `buildingId` (a user can be, say, owner
+ *  of one unit and tenant of another → one membership per role). */
+export function membershipsForBuilding(
+  user: UserType,
+  buildingId: string | Types.ObjectId | null | undefined,
+) {
+  if (!buildingId) return [];
+  const target = String(buildingId);
+  return user.memberships.filter((m) => String(m.buildingId) === target);
+}
+
+const ROLE_STRENGTH: Record<string, number> = { owner: 3, renter: 2, dependent: 1, independent: 0 };
+
+/** The representative membership for a building context: prefers a building-
+ *  admin membership, then the strongest role. Used for the token/capabilities
+ *  when a user has several roles in one building. */
+export function primaryMembership(
+  user: UserType,
+  buildingId: string | Types.ObjectId | null | undefined,
+) {
+  const ms = membershipsForBuilding(user, buildingId);
+  if (!ms.length) return undefined;
+  return [...ms].sort(
+    (a, b) =>
+      Number(!!b.isBuildingAdmin) - Number(!!a.isBuildingAdmin) ||
+      (ROLE_STRENGTH[b.role] ?? 0) - (ROLE_STRENGTH[a.role] ?? 0),
+  )[0];
+}
+
 export const User = model('User', UserSchema);

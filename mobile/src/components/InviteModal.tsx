@@ -23,6 +23,7 @@ const ROLE_KEY: Record<InvitableRole, StringKey> = {
   owner: 'role_owner',
   renter: 'role_renter',
   dependent: 'role_dependent',
+  independent: 'role_independent',
 };
 
 export interface InviteUnitOption {
@@ -69,8 +70,6 @@ export interface InviteModalProps {
   onInvited?: (result: { channel: 'email' | 'sms'; inviteUrl?: string }) => void;
 }
 
-type Channel = 'email' | 'phone';
-
 const INVITABLE_ROLES: InvitableRole[] = ['owner', 'renter', 'dependent'];
 
 export function InviteModal({
@@ -85,8 +84,9 @@ export function InviteModal({
   markBuildingAdmin,
   onInvited,
 }: InviteModalProps) {
-  const [channel, setChannel] = useState<Channel>('email');
   const [value, setValue] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [role, setRole] = useState<InvitableRole>(lockedRole ?? defaultRole);
   const [unitId, setUnitId] = useState<string | null>(lockedUnit?._id ?? null);
   const [submitting, setSubmitting] = useState(false);
@@ -96,8 +96,9 @@ export function InviteModal({
 
   useEffect(() => {
     if (open) {
-      setChannel('email');
       setValue('');
+      setFirstName('');
+      setLastName('');
       setRole(lockedRole ?? defaultRole);
       setUnitId(lockedUnit?._id ?? null);
       setError(null);
@@ -127,16 +128,17 @@ export function InviteModal({
   }
 
   const trimmed = value.trim();
-  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
   const phoneValid = /^\+?[0-9\s\-()]{6,}$/.test(trimmed);
-  const contactValid = channel === 'email' ? emailValid : phoneValid;
+  const contactValid = phoneValid;
+  // A display name is required so every user shows a username on their card.
+  const nameValid = firstName.trim().length > 0;
   // System admin appointing a building admin happens BEFORE any units
   // exist, so unit selection is optional in that one flow. Every other
   // invite still requires a unit because residents must live somewhere.
   const unitOptional = !!markBuildingAdmin;
   const unitValid = unitOptional || !!unitId;
   const roleValid = !roleDisabled(role);
-  const valid = contactValid && unitValid && roleValid;
+  const valid = contactValid && nameValid && unitValid && roleValid;
 
   const selectedUnitNumber =
     lockedUnit?.number ??
@@ -157,8 +159,9 @@ export function InviteModal({
     try {
       const body: Record<string, unknown> = { role };
       if (unitId) body.unitId = unitId;
-      if (channel === 'email') body.email = trimmed;
-      else body.phone = trimmed;
+      body.phone = trimmed;
+      body.firstName = firstName.trim();
+      if (lastName.trim()) body.lastName = lastName.trim();
       if (buildingId) body.buildingId = buildingId;
       if (markBuildingAdmin) body.isBuildingAdmin = true;
       const r = await api.post('/invites', body);
@@ -200,35 +203,42 @@ export function InviteModal({
             </View>
           ) : (
             <>
-              <Text style={styles.label}>{t('invite_channel_label')}</Text>
-              <View style={styles.chipRow}>
-                {(['email', 'phone'] as Channel[]).map((c) => (
-                  <TouchableOpacity
-                    key={c}
-                    onPress={() => { setChannel(c); setValue(''); }}
-                    style={[styles.chip, channel === c && styles.chipActive]}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={[styles.chipText, channel === c && styles.chipTextActive]}>
-                      {c === 'email' ? t('invite_channel_email') : t('invite_channel_mobile')}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
+              <View style={styles.nameRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.label}>{t('invite_first_name')} *</Text>
+                  <TextInput
+                    value={firstName}
+                    onChangeText={setFirstName}
+                    placeholder={t('invite_first_name_ph')}
+                    placeholderTextColor={palette.textSubtle}
+                    style={styles.input}
+                    autoCapitalize="words"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.label}>{t('invite_last_name')}</Text>
+                  <TextInput
+                    value={lastName}
+                    onChangeText={setLastName}
+                    placeholder={t('invite_last_name_ph')}
+                    placeholderTextColor={palette.textSubtle}
+                    style={styles.input}
+                    autoCapitalize="words"
+                  />
+                </View>
               </View>
 
-              <Text style={styles.label}>
-                {channel === 'email' ? t('invite_email_label') : t('invite_phone_label')}
-              </Text>
+              <Text style={styles.label}>{t('invite_phone_label')}</Text>
               <TextInput
                 value={value}
                 onChangeText={setValue}
-                placeholder={channel === 'email' ? t('invite_email_ph') : t('invite_phone_ph')}
+                placeholder={t('invite_phone_ph')}
                 placeholderTextColor={palette.textSubtle}
                 style={styles.input}
                 autoCapitalize="none"
                 autoCorrect={false}
-                keyboardType={channel === 'email' ? 'email-address' : 'phone-pad'}
-                textContentType={channel === 'email' ? 'emailAddress' : 'telephoneNumber'}
+                keyboardType="phone-pad"
+                textContentType="telephoneNumber"
               />
 
               {/* Unit picker. Hidden entirely when the admin is appointing
@@ -338,6 +348,7 @@ export function InviteModal({
 }
 
 const styles = StyleSheet.create({
+  nameRow: { flexDirection: 'row', gap: spacing.md },
   label: { ...type.small, color: palette.textMuted, marginTop: spacing.md, marginBottom: 4 },
   input: {
     borderWidth: 1,

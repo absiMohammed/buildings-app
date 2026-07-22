@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Alert,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -16,6 +15,7 @@ import {
   type SubscriptionPayment,
 } from '../components/RecordSubscriptionPaymentModal';
 import { SubscriptionReceiptModal } from '../components/SubscriptionReceiptModal';
+import { useConfirm } from '../components/ConfirmProvider';
 import { palette, radii, shadow, spacing, type } from '../components/theme';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
@@ -62,6 +62,7 @@ const STATUS_TONE: Record<SubscriptionPayment['status'], 'positive' | 'accent' |
  */
 export function AdminPaymentsPage() {
   const { t, tf } = useI18n();
+  const { confirm } = useConfirm();
   const [summary, setSummary] = useState<RevenueSummary | null>(null);
   const [payments, setPayments] = useState<SubscriptionPayment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -157,7 +158,7 @@ export function AdminPaymentsPage() {
     return (
       <View style={styles.center}>
         <EmptyState
-          icon="💳"
+          iconName="payments"
           title={t('sub_err_load')}
           body={error ?? ''}
           action={{ label: t('back'), onPress: () => void fetch() }}
@@ -299,19 +300,22 @@ export function AdminPaymentsPage() {
         ) : (
           payments.map((p, i) => {
             const isOverdue = p.status === 'pending' && new Date(p.dueDate) < new Date();
-            const openRow = () => {
+            const openRow = async () => {
               if (p.status === 'paid') {
-                Alert.alert(p.buildingName ?? '—', `${p.periodLabel} · ${fmt(p.amount, p.currency)}`, [
-                  { text: t('receipt_share'), onPress: () => setReceiptPayment(p) },
-                  {
-                    text: t('sub_edit_title'),
-                    onPress: () => {
-                      setEditingPayment(p);
-                      setRecordOpen(true);
-                    },
-                  },
-                  { text: t('cancel'), style: 'cancel' },
-                ]);
+                if (
+                  await confirm({
+                    title: p.buildingName ?? '—',
+                    message: `${p.periodLabel} · ${fmt(p.amount, p.currency)}`,
+                    confirmLabel: t('receipt_share'),
+                  })
+                ) {
+                  setReceiptPayment(p);
+                  return;
+                }
+                if (await confirm({ title: p.buildingName ?? '—', confirmLabel: t('sub_edit_title') })) {
+                  setEditingPayment(p);
+                  setRecordOpen(true);
+                }
                 return;
               }
               setEditingPayment(p);
@@ -322,7 +326,7 @@ export function AdminPaymentsPage() {
                 key={p._id}
                 style={[styles.row, i < payments.length - 1 && styles.divider]}
                 activeOpacity={0.85}
-                onPress={openRow}
+                onPress={() => void openRow()}
               >
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={[type.body, { fontWeight: '600' }]} numberOfLines={1}>

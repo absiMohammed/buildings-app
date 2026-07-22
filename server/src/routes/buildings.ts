@@ -4,7 +4,8 @@ import { Types } from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { validate } from '../middleware/validate.js';
 import { Building } from '../models/Building.js';
-import { User } from '../models/User.js';
+import { User, membershipFor, membershipsForBuilding } from '../models/User.js';
+import { rosterRow } from './users.js';
 import { Unit } from '../models/Unit.js';
 import { InviteToken } from '../models/InviteToken.js';
 import { getOrCreatePricing } from '../models/FeaturePricing.js';
@@ -16,7 +17,7 @@ import {
   SUBSCRIPTION_PAYMENT_METHODS,
   SUBSCRIPTION_PAYMENT_STATUSES,
 } from '../models/SubscriptionPayment.js';
-import { NotFound, BadRequest, Forbidden } from '../utils/errors.js';
+import { NotFound, BadRequest, Forbidden, AppError } from '../utils/errors.js';
 import {
   requireBuildingAdmin,
   requireSystemAdmin,
@@ -28,15 +29,18 @@ export const router = Router();
 router.get(
   '/me',
   asyncHandler(async (req, res) => {
-    const me = await User.findById((req as AuthedRequest).user.sub);
-    if (!me) throw NotFound('User not found');
-    const building = await Building.findById(me.buildingId).lean();
+    const building = await Building.findById((req as AuthedRequest).user.buildingId).lean();
     if (!building) throw NotFound('Building not found');
     res.json({ building });
   })
 );
 
 const ALLOWED_CURRENCIES = ['ILS', 'USD', 'EUR', 'GBP', 'JOD'] as const;
+
+const accessControlSchema = z.object({
+  enabled: z.boolean().optional(),
+  label: z.string().max(60).optional(),
+});
 
 const updateSchema = z.object({
   name: z.string().min(1).max(120).optional(),
@@ -60,6 +64,13 @@ const updateSchema = z.object({
         })
         .nullable()
         .optional(),
+      access: z
+        .object({
+          gate: accessControlSchema.optional(),
+          door: accessControlSchema.optional(),
+          elevator: accessControlSchema.optional(),
+        })
+        .optional(),
     })
     .optional(),
 });
@@ -79,7 +90,13 @@ router.patch(
     // knob, so we intentionally ignore enabledModules from /me.
     if (body.settings) {
       const existing = await Building.findById(me.buildingId).lean();
-      updates.settings = { ...(existing?.settings ?? {}), ...body.settings };
+      const merged: Record<string, unknown> = { ...(existing?.settings ?? {}), ...body.settings };
+      // Deep-merge access so toggling one control doesn't wipe the others.
+      if (body.settings.access) {
+        const prev = (existing?.settings as { access?: Record<string, unknown> } | undefined)?.access ?? {};
+        merged.access = { ...prev, ...body.settings.access };
+      }
+      updates.settings = merged;
     }
     const building = await Building.findByIdAndUpdate(me.buildingId, updates, { new: true });
     if (!building) throw NotFound('Building not found');
@@ -96,6 +113,10 @@ const createBuildingSchema = z.object({
   address: z.string().max(500).optional(),
   currency: z.enum(ALLOWED_CURRENCIES).default('ILS'),
   timezone: z.string().min(1).max(60).optional(),
+  // Optional location pin for the building.
+  geoCenter: z
+    .object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) })
+    .optional(),
 });
 
 router.get(
@@ -217,17 +238,19 @@ router.get(
       topBuildingsAgg,
     ] = await Promise.all([
       Building.find({}, { name: 1, status: 1 }).lean(),
-      User.countDocuments({}),
-      User.countDocuments({ role: 'admin' }),
-      User.countDocuments({ role: 'owner' }),
-      User.countDocuments({ role: 'renter' }),
-      User.countDocuments({ role: 'dependent' }),
-      User.countDocuments({ isBuildingAdmin: true, status: { $in: ['active', 'invited'] } }),
+      // Super-admins are application managers, not residents — exclude them
+      // from the user total and role breakdown.
+      User.countDocuments({ systemRole: 'member' }),
+      User.countDocuments({ systemRole: 'admin' }),
+      User.countDocuments({ 'memberships.role': 'owner' }),
+      User.countDocuments({ 'memberships.role': 'renter' }),
+      User.countDocuments({ 'memberships.role': 'dependent' }),
+      User.countDocuments({ 'memberships.isBuildingAdmin': true, status: { $in: ['active', 'invited'] } }),
       Unit.countDocuments({}),
       InviteToken.countDocuments({ usedAt: null }),
       User.aggregate<{ _id: Types.ObjectId; count: number }>([
-        { $match: { buildingId: { $ne: null } } },
-        { $group: { _id: '$buildingId', count: { $sum: 1 } } },
+        { $unwind: '$memberships' },
+        { $group: { _id: '$memberships.buildingId', count: { $sum: 1 } } },
         { $sort: { count: -1 } },
         { $limit: 5 },
       ]),
@@ -239,8 +262,10 @@ router.get(
     // building-admin owners, so a building with a pending appointment is
     // still considered "covered").
     const buildingAdminByBuildingAgg = await User.aggregate<{ _id: Types.ObjectId | null }>([
-      { $match: { isBuildingAdmin: true, status: { $in: ['active', 'invited'] } } },
-      { $group: { _id: '$buildingId' } },
+      { $match: { status: { $in: ['active', 'invited'] } } },
+      { $unwind: '$memberships' },
+      { $match: { 'memberships.isBuildingAdmin': true } },
+      { $group: { _id: '$memberships.buildingId' } },
     ]);
     const buildingsWithAdmin = new Set(
       buildingAdminByBuildingAgg.map((r) => (r._id ? String(r._id) : null)).filter(Boolean)
@@ -279,23 +304,42 @@ router.get(
   requireSystemAdmin,
   asyncHandler(async (_req, res) => {
     const [users, buildings] = await Promise.all([
-      User.find().sort({ createdAt: -1 }),
+      // Exclude system super-admins — they aren't building residents and must
+      // not appear in the user roster.
+      User.find({ systemRole: 'member' }).sort({ createdAt: -1 }),
       Building.find({}, { name: 1, status: 1 }).lean(),
     ]);
     const buildingById = new Map(buildings.map((b) => [String(b._id), b]));
-    res.json({
-      users: users.map((u) => {
-        const json = u.toJSON() as Record<string, unknown>;
-        const bid = u.buildingId ? String(u.buildingId) : null;
-        const b = bid ? buildingById.get(bid) : null;
+    // Resolve unit numbers for every unit referenced across all memberships.
+    const allUnitIds = users.flatMap((u) => u.memberships.flatMap((m) => m.unitIds));
+    const units = allUnitIds.length
+      ? await Unit.find({ _id: { $in: allUnitIds } }, { number: 1 }).lean()
+      : [];
+    const unitNumberById = new Map(units.map((u) => [String(u._id), u.number]));
+
+    // One row PER USER, regardless of building. Each row carries a summary of
+    // every building the user belongs to (with that building's role + units).
+    const rows = users.map((u) => ({
+      _id: String(u._id),
+      phone: u.phone,
+      email: u.email ?? null,
+      firstName: u.firstName,
+      lastName: u.lastName,
+      status: u.status,
+      memberships: u.memberships.map((m) => {
+        const b = buildingById.get(String(m.buildingId));
         return {
-          ...json,
-          building: b
-            ? { _id: String(b._id), name: b.name, status: b.status ?? 'active' }
-            : null,
+          buildingId: String(m.buildingId),
+          buildingName: b?.name ?? '—',
+          buildingStatus: b?.status ?? 'active',
+          role: m.role,
+          isBuildingAdmin: !!m.isBuildingAdmin,
+          unitIds: (m.unitIds ?? []).map((x) => String(x)),
+          unitNumbers: (m.unitIds ?? []).map((x) => unitNumberById.get(String(x))).filter(Boolean),
         };
       }),
-    });
+    }));
+    res.json({ users: rows });
   })
 );
 
@@ -309,7 +353,13 @@ router.post(
       name: body.name,
       address: body.address ?? '',
       currency: body.currency,
-      settings: { timezone: body.timezone ?? 'UTC' },
+      // New buildings start INACTIVE and can only be activated once a
+      // building admin has been assigned (enforced on PATCH /:id/status).
+      status: 'inactive',
+      settings: {
+        timezone: body.timezone ?? 'UTC',
+        ...(body.geoCenter ? { geoCenter: body.geoCenter } : {}),
+      },
     });
     res.status(201).json({ building });
   })
@@ -347,6 +397,23 @@ router.patch(
   validate(statusBodySchema),
   asyncHandler(async (req, res) => {
     const next = (req.body as z.infer<typeof statusBodySchema>).status;
+    // A building can only be activated once it has at least one building admin.
+    if (next === 'active') {
+      const adminCount = await User.countDocuments({
+        buildingId: req.params.id,
+        isBuildingAdmin: true,
+        status: { $in: ['active', 'invited'] },
+      });
+      if (adminCount === 0) {
+        // Distinct code so the client can show a localized message instead of
+        // this English fallback.
+        throw new AppError(
+          400,
+          'BUILDING_NEEDS_ADMIN',
+          'Assign a building admin before activating this building.',
+        );
+      }
+    }
     const building = await Building.findByIdAndUpdate(
       req.params.id,
       { status: next },
@@ -365,8 +432,8 @@ router.get(
   asyncHandler(async (req, res) => {
     const buildingId = req.params.id ?? '';
     if (!Types.ObjectId.isValid(buildingId)) throw BadRequest('Invalid id');
-    const users = await User.find({ buildingId }).sort({ createdAt: -1 });
-    res.json({ users: users.map((u) => u.toJSON()) });
+    const users = await User.find({ 'memberships.buildingId': buildingId }).sort({ createdAt: -1 });
+    res.json({ users: users.map((u) => rosterRow(u, buildingId)) });
   })
 );
 
@@ -383,6 +450,58 @@ router.get(
   })
 );
 
+// System-admin unit management for a target building. Lets the platform admin
+// fully set up a building (units + admin) before handing it off — the building
+// admin manages units for their own building via /units.
+const unitInputSchema = z.object({
+  number: z.string().min(1).max(20),
+  floor: z.number().int().optional(),
+  sqft: z.number().min(0).optional(),
+  bedrooms: z.number().int().min(0).optional(),
+  monthlyDuesAmount: z.number().min(0).optional(),
+  monthlyDuesDayOverride: z.number().int().min(1).max(28).nullable().optional(),
+  notes: z.string().max(500).optional(),
+});
+
+router.post(
+  '/:id/units',
+  requireSystemAdmin,
+  validate(unitInputSchema),
+  asyncHandler(async (req, res) => {
+    const buildingId = req.params.id ?? '';
+    if (!Types.ObjectId.isValid(buildingId)) throw BadRequest('Invalid id');
+    const b = await Building.findById(buildingId);
+    if (!b) throw NotFound('Building not found');
+    const unit = await Unit.create({ ...(req.body as z.infer<typeof unitInputSchema>), buildingId });
+    res.status(201).json({ unit });
+  })
+);
+
+router.patch(
+  '/:id/units/:unitId',
+  requireSystemAdmin,
+  validate(unitInputSchema.partial()),
+  asyncHandler(async (req, res) => {
+    const { id, unitId } = req.params;
+    if (!Types.ObjectId.isValid(id ?? '') || !Types.ObjectId.isValid(unitId ?? '')) throw BadRequest('Invalid id');
+    const unit = await Unit.findOneAndUpdate({ _id: unitId, buildingId: id }, req.body, { new: true });
+    if (!unit) throw NotFound('Unit not found');
+    res.json({ unit });
+  })
+);
+
+router.delete(
+  '/:id/units/:unitId',
+  requireSystemAdmin,
+  asyncHandler(async (req, res) => {
+    const { id, unitId } = req.params;
+    if (!Types.ObjectId.isValid(id ?? '') || !Types.ObjectId.isValid(unitId ?? '')) throw BadRequest('Invalid id');
+    const unit = await Unit.findOneAndDelete({ _id: unitId, buildingId: id });
+    if (!unit) throw NotFound('Unit not found');
+    res.status(204).end();
+  })
+);
+
 router.delete(
   '/:id',
   requireSystemAdmin,
@@ -391,7 +510,7 @@ router.delete(
     // Refuse to delete a building that still has users or units attached.
     // System admin must drain it first; this prevents orphan data.
     const [userCount, unitCount] = await Promise.all([
-      User.countDocuments({ buildingId: id, role: { $ne: 'admin' } }),
+      User.countDocuments({ 'memberships.buildingId': id }),
       Unit.countDocuments({ buildingId: id }),
     ]);
     if (userCount > 0 || unitCount > 0) {
@@ -422,31 +541,38 @@ router.patch(
 
     if (me.role === 'admin') {
       // System admin — allowed.
-    } else if (me.role === 'owner') {
-      const meDoc = await User.findById(me.sub).select('isBuildingAdmin buildingId').lean();
-      if (!meDoc?.isBuildingAdmin || String(meDoc.buildingId) !== buildingId) {
-        throw BadRequest('Only the current building admin can hand off the role.');
-      }
+    } else if (me.isBuildingAdmin && me.buildingId === buildingId) {
+      // Current building admin — allowed to hand off within their building.
     } else {
-      throw BadRequest('Forbidden');
+      throw BadRequest('Only the current building admin can hand off the role.');
     }
 
-    const target = await User.findOne({ _id: userId, buildingId });
+    const target = await User.findOne({ _id: userId, 'memberships.buildingId': buildingId });
     if (!target) throw NotFound('User not found in this building');
-    if (target.role !== 'owner') {
-      throw BadRequest('Only an owner can be designated building admin.');
+    if (target.systemRole === 'admin') {
+      throw BadRequest('The system administrator cannot be a building admin.');
     }
+    const memberships = membershipsForBuilding(target, buildingId);
+    if (!memberships.length) throw NotFound('User not found in this building');
     const next = (req.body as z.infer<typeof nominateSchema>).isBuildingAdmin;
-    if (next) {
-      // At most one building admin per building — clear any prior one.
-      await User.updateMany(
-        { buildingId, isBuildingAdmin: true, _id: { $ne: target._id } },
-        { isBuildingAdmin: false }
-      );
-    }
-    target.isBuildingAdmin = next;
+    // Building-admin is a building-level flag — apply across all the user's
+    // roles/units in this building.
+    for (const m of memberships) m.isBuildingAdmin = next;
     await target.save();
-    res.json({ user: target.toJSON() });
+
+    // A building can't stay active without a manager: if this removed the last
+    // building admin, deactivate the building.
+    if (!next) {
+      const remaining = await User.countDocuments({
+        memberships: { $elemMatch: { buildingId, isBuildingAdmin: true } },
+        status: { $in: ['active', 'invited'] },
+      });
+      if (remaining === 0) {
+        await Building.findByIdAndUpdate(buildingId, { status: 'inactive' });
+      }
+    }
+
+    res.json({ user: rosterRow(target, buildingId) });
   })
 );
 
@@ -475,10 +601,7 @@ router.get(
     if (!buildingId || !Types.ObjectId.isValid(buildingId)) throw BadRequest('Invalid id');
     if (me.role !== 'admin') {
       // Building admins can only list their own building's actions.
-      const meDoc = await User.findById(me.sub).select('isBuildingAdmin buildingId').lean();
-      if (!meDoc?.isBuildingAdmin || String(meDoc.buildingId) !== buildingId) {
-        throw Forbidden();
-      }
+      if (!me.isBuildingAdmin || me.buildingId !== buildingId) throw Forbidden();
     }
     const actions = await BuildingAction.find({ buildingId }).sort({ createdAt: -1 });
     res.json({ actions: actions.map((a) => a.toJSON()) });

@@ -6,6 +6,7 @@ import { useAuth } from '../auth/AuthContext';
 import { RoleGate } from '../auth/RoleGate';
 import { palette, type } from '../components/theme';
 import { LoginPage } from '../pages/LoginPage';
+import { ChangePasswordModal } from '../components/ChangePasswordModal';
 import { AcceptInvitePage } from '../pages/AcceptInvitePage';
 import { DashboardPage } from '../pages/DashboardPage';
 import { PaymentsPage } from '../pages/PaymentsPage';
@@ -19,6 +20,8 @@ import { MyHouseholdPage } from '../pages/MyHouseholdPage';
 import { BuildingsPage } from '../pages/BuildingsPage';
 import { BuildingDetailPage } from '../pages/BuildingDetailPage';
 import { BuildingUsersPage } from '../pages/BuildingUsersPage';
+import { BuildingActionsPage } from '../pages/BuildingActionsPage';
+import { BuildingUnitsPage } from '../pages/BuildingUnitsPage';
 import { AllUsersPage } from '../pages/AllUsersPage';
 import { AdminPricingPage } from '../pages/AdminPricingPage';
 import { AdminPaymentsPage } from '../pages/AdminPaymentsPage';
@@ -245,6 +248,20 @@ function BuildingsStackScreen() {
           </RoleGate>
         )}
       </BuildingsStack.Screen>
+      <BuildingsStack.Screen name="BuildingActions" options={{ title: t('actions_section_title') }}>
+        {() => (
+          <RoleGate roles={['admin']}>
+            <BuildingActionsPage />
+          </RoleGate>
+        )}
+      </BuildingsStack.Screen>
+      <BuildingsStack.Screen name="BuildingUnits" options={{ title: t('buildings_units_title') }}>
+        {() => (
+          <RoleGate roles={['admin']}>
+            <BuildingUnitsPage />
+          </RoleGate>
+        )}
+      </BuildingsStack.Screen>
     </BuildingsStack.Navigator>
   );
 }
@@ -351,6 +368,8 @@ export function RootNavigator() {
   return (
     <NavigationContainer>
       {user ? <AppNavigator /> : <AuthNavigator />}
+      {/* First login after an admin create/reset: force a password change. */}
+      {user?.mustChangePassword ? <ChangePasswordModal open forced /> : null}
     </NavigationContainer>
   );
 }

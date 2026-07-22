@@ -81,3 +81,46 @@ export async function disableBiometricLogin(): Promise<void> {
     /* swallow */
   }
 }
+
+// ── Per-account credentials ───────────────────────────────────────────────
+// The recent-accounts card lets each saved login be unlocked individually, so
+// we store one biometric-gated refresh token per account, keyed by phone.
+
+function accountService(phone: string): string {
+  return `com.buildingapp.acct.${phone.replace(/[^0-9]/g, '')}`;
+}
+
+export async function enableBiometricForAccount(phone: string, refreshToken: string): Promise<void> {
+  await Keychain.setInternetCredentials(accountService(phone), 'refresh', refreshToken, {
+    accessControl: Keychain.ACCESS_CONTROL.BIOMETRY_CURRENT_SET,
+    accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+    securityLevel: Keychain.SECURITY_LEVEL.SECURE_HARDWARE,
+  });
+}
+
+export async function hasBiometricForAccount(phone: string): Promise<boolean> {
+  try {
+    return !!(await Keychain.hasInternetCredentials({ server: accountService(phone) }));
+  } catch {
+    return false;
+  }
+}
+
+export async function tryBiometricForAccount(phone: string, promptTitle: string): Promise<string | null> {
+  try {
+    const result = await Keychain.getInternetCredentials(accountService(phone), {
+      authenticationPrompt: { title: promptTitle },
+    });
+    return result ? result.password : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function disableBiometricForAccount(phone: string): Promise<void> {
+  try {
+    await Keychain.resetInternetCredentials({ server: accountService(phone) });
+  } catch {
+    /* swallow */
+  }
+}

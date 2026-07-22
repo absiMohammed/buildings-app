@@ -1,8 +1,16 @@
 import { useEffect, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useAuth, useCurrency, type BuildingSummary, type Role } from '../auth/AuthContext';
 import { api } from '../api/client';
+import { runMonthlyDues } from '../api/payments';
+import { listUnits, type Unit } from '../api/units';
+import { getRefreshToken } from '../api/client';
+import { setPinForAccount, hasPinForAccount, disablePinForAccount } from '../auth/pin';
+import { fmtMoney } from '../utils/format';
 import { Avatar, Button, Card, Pill, SectionHeader } from '../components/ui';
+import { Icon } from '../components/Icon';
+import { PinModal } from '../components/PinModal';
+import { useConfirm } from '../components/ConfirmProvider';
 import { palette, radii, spacing, type, textStart } from '../components/theme';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
@@ -20,6 +28,7 @@ const ROLE_KEY: Record<Role, StringKey> = {
   owner: 'role_owner',
   renter: 'role_renter',
   dependent: 'role_dependent',
+  independent: 'role_independent',
 };
 
 const ROLE_TONE: Record<Role, 'accent' | 'positive' | 'warning' | 'neutral'> = {
@@ -27,6 +36,7 @@ const ROLE_TONE: Record<Role, 'accent' | 'positive' | 'warning' | 'neutral'> = {
   owner: 'positive',
   renter: 'warning',
   dependent: 'neutral',
+  independent: 'neutral',
 };
 
 // Notification toggles, scoped per role. Keys match StringKey entries in strings.ts.
@@ -35,12 +45,24 @@ const NOTIF_KEYS_BY_ROLE: Record<Role, StringKey[]> = {
   owner: ['settings_notif_rent', 'settings_notif_overdue', 'settings_notif_maintenance', 'settings_notif_polls'],
   renter: ['settings_notif_payments', 'settings_notif_maintenance', 'settings_notif_polls'],
   dependent: ['settings_notif_polls', 'settings_notif_household'],
+  independent: ['settings_notif_maintenance'],
 };
 
 export function SettingsPage() {
-  const { user, building, updateBuilding, logout } = useAuth();
+  const { user, building, updateBuilding, switchBuilding, logout } = useAuth();
+
+  async function doSwitchBuilding(buildingId: string) {
+    try {
+      await switchBuilding(buildingId);
+    } catch (e) {
+      const msg = (e as { response?: { data?: { error?: { message?: string } } } })
+        ?.response?.data?.error?.message;
+      await confirm({ title: t('buildings_err_load'), message: msg ?? '', confirmLabel: t('done') });
+    }
+  }
   const currentCurrency = useCurrency();
-  const { t, locale, setLocale } = useI18n();
+  const { t, tf, locale, setLocale } = useI18n();
+  const { confirm } = useConfirm();
   const role = user?.role ?? 'renter';
   const isAdmin = role === 'admin';
 
@@ -53,6 +75,45 @@ export function SettingsPage() {
   const [savingDay, setSavingDay] = useState(false);
   const [amountDraft, setAmountDraft] = useState(String(building?.settings?.defaultMonthlyDues ?? 0));
   const [savingAmount, setSavingAmount] = useState(false);
+  const [generatingDues, setGeneratingDues] = useState(false);
+  const [projUnits, setProjUnits] = useState<Unit[]>([]);
+  const accessInit = building?.settings?.access;
+  const [access, setAccess] = useState({
+    gate: { enabled: accessInit?.gate?.enabled ?? true, label: accessInit?.gate?.label ?? '' },
+    door: { enabled: accessInit?.door?.enabled ?? true, label: accessInit?.door?.label ?? '' },
+    elevator: { enabled: accessInit?.elevator?.enabled ?? false, label: accessInit?.elevator?.label ?? '' },
+  });
+  const [savingAccess, setSavingAccess] = useState(false);
+  const userPhone = user?.phone ?? '';
+  const [hasPin, setHasPin] = useState(false);
+  const [pinModalOpen, setPinModalOpen] = useState(false);
+
+  useEffect(() => {
+    if (!userPhone) return;
+    let cancelled = false;
+    hasPinForAccount(userPhone).then((v) => !cancelled && setHasPin(v));
+    return () => {
+      cancelled = true;
+    };
+  }, [userPhone]);
+
+  async function onSetPin(pin: string) {
+    const rt = getRefreshToken();
+    if (!userPhone || !rt) {
+      setPinModalOpen(false);
+      return;
+    }
+    await setPinForAccount(userPhone, pin, rt);
+    setHasPin(true);
+    setPinModalOpen(false);
+    setSavedAt(Date.now());
+  }
+
+  async function removePin() {
+    if (!userPhone) return;
+    await disablePinForAccount(userPhone);
+    setHasPin(false);
+  }
   const [latDraft, setLatDraft] = useState(
     building?.settings?.geoCenter?.lat == null ? '' : String(building.settings.geoCenter.lat)
   );
@@ -132,6 +193,56 @@ export function SettingsPage() {
     }
   }
 
+  // Load units (admin only) to project the monthly collection total.
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    listUnits()
+      .then((u) => !cancelled && setProjUnits(u))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin]);
+
+  const defaultDue = building?.settings?.defaultMonthlyDues ?? 0;
+  const projectedMonthly = projUnits.reduce(
+    (sum, u) => sum + (u.monthlyDuesAmount ?? defaultDue),
+    0,
+  );
+
+  async function saveAccess() {
+    setSavingAccess(true);
+    setError(null);
+    try {
+      const r = await api.patch('/buildings/me', { settings: { access } });
+      updateBuilding(r.data.building as BuildingSummary);
+      setSavedAt(Date.now());
+    } catch (e) {
+      const msg = (e as { response?: { data?: { error?: { message?: string } } } })?.response?.data?.error?.message;
+      setError(msg ?? t('settings_access_save_failed'));
+    } finally {
+      setSavingAccess(false);
+    }
+  }
+
+  async function generateDuesNow() {
+    setGeneratingDues(true);
+    setError(null);
+    try {
+      const count = await runMonthlyDues();
+      await confirm({
+        title: t('settings_dues_generate_title'),
+        message: count > 0 ? tf('settings_dues_generated', { count }) : t('settings_dues_generate_none'),
+      });
+    } catch (e) {
+      const msg = (e as { response?: { data?: { error?: { message?: string } } } })?.response?.data?.error?.message;
+      setError(msg ?? t('settings_dues_generate_failed'));
+    } finally {
+      setGeneratingDues(false);
+    }
+  }
+
   async function saveName() {
     const trimmed = nameDraft.trim();
     if (!trimmed || trimmed === building?.name) return;
@@ -200,14 +311,20 @@ export function SettingsPage() {
     }
   }
 
-  function confirmSignOut() {
-    Alert.alert(t('settings_account_signout'), t('settings_account_signout_confirm'), [
-      { text: t('cancel'), style: 'cancel' },
-      { text: t('settings_account_signout'), style: 'destructive', onPress: () => logout() },
-    ]);
+  async function confirmSignOut() {
+    if (
+      await confirm({
+        title: t('settings_account_signout'),
+        message: t('settings_account_signout_confirm'),
+        confirmLabel: t('settings_account_signout'),
+        destructive: true,
+      })
+    ) {
+      logout();
+    }
   }
 
-  const fullName = `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || user?.email || '—';
+  const fullName = `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || user?.phone || '—';
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
@@ -222,13 +339,47 @@ export function SettingsPage() {
           <Avatar name={fullName} />
           <View style={{ flex: 1, minWidth: 0 }}>
             <Text style={[type.body, { fontWeight: '700' }]} numberOfLines={1}>{fullName}</Text>
-            <Text style={type.small} numberOfLines={1}>{user?.email ?? '—'}</Text>
+            <Text style={type.small} numberOfLines={1}>{user?.phone ?? '—'}</Text>
           </View>
           <Pill label={t(ROLE_KEY[role])} tone={ROLE_TONE[role]} />
         </View>
         <View style={styles.divider} />
         <DetailRow label={t('settings_profile_unit')} value={myUnit ? `${myUnit.number}` : t('settings_profile_no_unit')} />
       </Card>
+
+      {/* ── Building switcher (members of more than one building) ── */}
+      {(user?.memberships?.length ?? 0) > 1 && (
+        <>
+          <SectionHeader title={t('settings_section_buildings')} />
+          <Card padded={false}>
+            {user!.memberships!.map((m, i) => {
+              const isActive = m.buildingId === user!.activeBuildingId;
+              return (
+                <TouchableOpacity
+                  key={m.buildingId}
+                  disabled={isActive}
+                  activeOpacity={0.85}
+                  onPress={() => void doSwitchBuilding(m.buildingId)}
+                  style={[styles.switchRow, i < user!.memberships!.length - 1 && styles.divider]}
+                >
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={[type.body, { fontWeight: '600' }]} numberOfLines={1}>{m.buildingName}</Text>
+                    <Text style={type.small} numberOfLines={1}>
+                      {t(ROLE_KEY[m.role])}
+                      {m.isBuildingAdmin ? ` · ${t('users_pill_building_admin')}` : ''}
+                    </Text>
+                  </View>
+                  {isActive ? (
+                    <Icon name="check" size={20} color={palette.accent} />
+                  ) : (
+                    <Icon name="chevronLeft" size={18} color={palette.textSubtle} />
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </Card>
+        </>
+      )}
 
       {/* ── Language (all roles) ── */}
       <SectionHeader title={t('settings_section_language')} />
@@ -342,6 +493,64 @@ export function SettingsPage() {
             </View>
           </Card>
 
+          <Card>
+            <Text style={[type.body, { fontWeight: '700', marginBottom: 4 }]}>
+              {t('settings_dues_generate_title')}
+            </Text>
+            <Text style={styles.fieldLabel}>
+              {tf('settings_dues_generate_hint', { day: building?.settings?.monthlyDuesDay ?? 1 })}
+            </Text>
+            {projUnits.length > 0 ? (
+              <Text style={[type.small, { marginTop: spacing.sm }]}>
+                {tf('settings_dues_projected', {
+                  amount: fmtMoney(projectedMonthly, currentCurrency),
+                  units: projUnits.length,
+                })}
+              </Text>
+            ) : null}
+            <Button
+              label={t('settings_dues_generate_btn')}
+              onPress={generateDuesNow}
+              loading={generatingDues}
+              disabled={generatingDues}
+              variant="secondary"
+              style={{ marginTop: spacing.md }}
+            />
+          </Card>
+
+          <SectionHeader title={t('settings_section_access')} />
+          <Card>
+            <Text style={styles.fieldLabel}>{t('settings_access_hint')}</Text>
+            {(['gate', 'door', 'elevator'] as const).map((key) => (
+              <View key={key} style={styles.accessRow}>
+                <View style={styles.accessHead}>
+                  <Text style={[type.body, { fontWeight: '600' }]}>
+                    {t(key === 'gate' ? 'settings_access_gate' : key === 'door' ? 'settings_access_door' : 'settings_access_elevator')}
+                  </Text>
+                  <Switch
+                    value={access[key].enabled}
+                    onValueChange={(v) => setAccess((a) => ({ ...a, [key]: { ...a[key], enabled: v } }))}
+                  />
+                </View>
+                <TextInput
+                  value={access[key].label}
+                  onChangeText={(v) => setAccess((a) => ({ ...a, [key]: { ...a[key], label: v } }))}
+                  placeholder={t('settings_access_label_ph')}
+                  placeholderTextColor={palette.textSubtle}
+                  maxLength={60}
+                  style={styles.nameInput}
+                />
+              </View>
+            ))}
+            <Button
+              label={savingAccess ? t('saving') : t('save')}
+              onPress={saveAccess}
+              loading={savingAccess}
+              disabled={savingAccess}
+              style={{ marginTop: spacing.md }}
+            />
+          </Card>
+
           <SectionHeader title={t('settings_section_geo_center')} />
           <Card>
             <Text style={styles.fieldLabel}>{t('settings_geo_center_hint')}</Text>
@@ -423,6 +632,31 @@ export function SettingsPage() {
         </View>
       ) : null}
 
+      {/* ── Quick sign-in PIN (building users only; never the super-admin) ── */}
+      {userPhone && !isAdmin ? (
+        <>
+          <SectionHeader title={t('settings_pin_title')} />
+          <Card>
+            <Text style={styles.fieldLabel}>{hasPin ? t('settings_pin_on') : t('settings_pin_hint')}</Text>
+            <View style={styles.nameRow}>
+              <Button
+                label={hasPin ? t('settings_pin_change') : t('settings_pin_set')}
+                onPress={() => setPinModalOpen(true)}
+                style={{ paddingHorizontal: 16 }}
+              />
+              {hasPin ? (
+                <Button
+                  label={t('settings_pin_remove')}
+                  onPress={removePin}
+                  variant="secondary"
+                  style={{ paddingHorizontal: 16 }}
+                />
+              ) : null}
+            </View>
+          </Card>
+        </>
+      ) : null}
+
       {/* ── About (all roles, read-only) ── */}
       <SectionHeader title={t('settings_section_about')} />
       <Card>
@@ -438,11 +672,19 @@ export function SettingsPage() {
         <Button
           label={t('settings_account_signout')}
           variant="danger"
-          onPress={confirmSignOut}
+          onPress={() => void confirmSignOut()}
         />
       </Card>
 
       <View style={{ height: spacing.xl }} />
+
+      <PinModal
+        visible={pinModalOpen}
+        mode="set"
+        title={t('settings_pin_title')}
+        onSubmit={onSetPin}
+        onClose={() => setPinModalOpen(false)}
+      />
     </ScrollView>
   );
 }
@@ -464,6 +706,7 @@ const styles = StyleSheet.create({
   langRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.lg, paddingVertical: spacing.md, gap: spacing.md },
   toggleRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.lg, paddingVertical: spacing.md, gap: spacing.md },
   profileRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  switchRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
   divider: { height: StyleSheet.hairlineWidth, backgroundColor: palette.divider, marginVertical: spacing.md },
   detailRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, gap: spacing.md },
   errorBanner: { marginTop: spacing.md, padding: spacing.md, backgroundColor: palette.dangerSoft, borderRadius: radii.md },
@@ -471,6 +714,8 @@ const styles = StyleSheet.create({
   savedBanner: { marginTop: spacing.md, padding: spacing.md, backgroundColor: palette.successSoft, borderRadius: radii.md },
   savedText: { color: palette.success, fontSize: 13, fontWeight: '600' },
   fieldLabel: { ...type.small, color: palette.textMuted, marginBottom: 6 },
+  accessRow: { marginTop: spacing.md, gap: 6 },
+  accessHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   geoRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
   geoLabel: { ...type.small, color: palette.textMuted, marginBottom: 4 },

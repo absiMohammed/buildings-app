@@ -4,9 +4,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const ACCESS_KEY = 'ba_access';
 const REFRESH_KEY = 'ba_refresh';
 
-// Always talk to the deployed Render backend, dev and release alike.
+// Always talk to the deployed Fly backend, dev and release alike.
 // To point at a local server, change the host below temporarily.
-export const API_BASE_URL = 'https://building-app-server.onrender.com/api/v1';
+export const API_BASE_URL = 'https://building-app-api.fly.dev/api/v1';
 
 let accessToken: string | null = null;
 let refreshToken: string | null = null;
@@ -66,7 +66,9 @@ async function refreshAccess(): Promise<string> {
   if (!refreshToken) throw new Error('No refresh token');
   const res = await axios.post(`${API_BASE_URL}/auth/refresh`, { refreshToken });
   const access = res.data.accessToken as string;
-  await setTokens(access);
+  // The refresh endpoint may rotate the refresh token — persist the new one
+  // or the old token dies on the server and the next refresh logs us out.
+  await setTokens(access, (res.data.refreshToken as string | undefined) ?? refreshToken);
   return access;
 }
 

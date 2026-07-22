@@ -5,6 +5,7 @@ import { BottomSheet } from './BottomSheet';
 import { Button } from './ui';
 import { palette, radii, spacing, type, textStart } from './theme';
 import { useI18n } from '../i18n';
+import { MapPicker, type LatLng } from './MapPicker';
 import type { AdminBuilding } from '../pages/BuildingsPage';
 
 // Curated allow-list of timezones the admin can choose for a building.
@@ -67,6 +68,8 @@ export function BuildingFormModal({ open, onClose, initial, onSaved }: BuildingF
   const [address, setAddress] = useState('');
   const [currency, setCurrency] = useState('ILS');
   const [timezone, setTimezone] = useState('');
+  const [geoCenter, setGeoCenter] = useState<LatLng | null>(null);
+  const [mapOpen, setMapOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,6 +80,8 @@ export function BuildingFormModal({ open, onClose, initial, onSaved }: BuildingF
     setAddress(initial?.address ?? '');
     setCurrency(initial?.currency ?? 'ILS');
     setTimezone(initial?.settings?.timezone ?? 'UTC');
+    const g = initial?.settings?.geoCenter;
+    setGeoCenter(g?.lat != null && g?.lng != null ? { lat: g.lat, lng: g.lng } : null);
   }, [open, initial]);
 
   const trimmedName = name.trim();
@@ -100,14 +105,21 @@ export function BuildingFormModal({ open, onClose, initial, onSaved }: BuildingF
         currency,
       };
       const timezoneClean = timezone.trim();
-      if (timezoneClean) body.settings = { timezone: timezoneClean };
+      const settings: Record<string, unknown> = {};
+      if (timezoneClean) settings.timezone = timezoneClean;
       if (initial) {
         body.address = address.trim();
+        // EDIT: geoCenter is nested under settings on PATCH.
+        if (geoCenter) settings.geoCenter = geoCenter;
+        if (Object.keys(settings).length > 0) body.settings = settings;
         const r = await api.patch(`/buildings/${initial._id}`, body);
         onSaved?.(r.data.building as AdminBuilding);
       } else {
         body.address = address.trim() || undefined;
         if (timezoneClean) body.timezone = timezoneClean;
+        if (Object.keys(settings).length > 0) body.settings = settings;
+        // CREATE: geoCenter is a top-level field on POST.
+        if (geoCenter) body.geoCenter = geoCenter;
         const r = await api.post('/buildings', body);
         onSaved?.(r.data.building as AdminBuilding);
       }
@@ -183,6 +195,18 @@ export function BuildingFormModal({ open, onClose, initial, onSaved }: BuildingF
           ))}
         </ScrollView>
 
+        <Text style={styles.label}>{t('building_location')}</Text>
+        <Button
+          label={t('building_set_location')}
+          variant="secondary"
+          onPress={() => setMapOpen(true)}
+        />
+        {geoCenter ? (
+          <Text style={[type.small, { marginTop: 6, color: palette.textMuted }]}>
+            {t('building_location_set')}: {geoCenter.lat.toFixed(5)}, {geoCenter.lng.toFixed(5)}
+          </Text>
+        ) : null}
+
         {error ? (
           <View style={styles.errorBox}>
             <Text style={styles.errorText}>{error}</Text>
@@ -206,6 +230,16 @@ export function BuildingFormModal({ open, onClose, initial, onSaved }: BuildingF
           />
         </View>
       </ScrollView>
+
+      <MapPicker
+        visible={mapOpen}
+        initial={geoCenter}
+        onPick={(coords) => {
+          setGeoCenter(coords);
+          setMapOpen(false);
+        }}
+        onClose={() => setMapOpen(false)}
+      />
     </BottomSheet>
   );
 }

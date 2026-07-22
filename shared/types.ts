@@ -1,7 +1,26 @@
 // Types shared between client and server.
 // Keep this file dependency-free.
 
-export type Role = 'admin' | 'owner' | 'renter' | 'dependent';
+// 'independent' = a building-scoped user with no apartment (guard, staff, etc.).
+export type Role = 'admin' | 'owner' | 'renter' | 'dependent' | 'independent';
+
+// System-level role. 'admin' is the application super-admin (no buildings);
+// 'member' is any normal user, whose per-building roles live in `memberships`.
+export type SystemRole = 'admin' | 'member';
+
+// Building-scoped roles a membership can carry (never the system super-admin).
+export type BuildingRole = 'owner' | 'renter' | 'dependent' | 'independent';
+
+// One user ↔ one building relationship. A user can hold many memberships:
+// different buildings, and/or several units within a building, with a role
+// (and building-admin flag) per building.
+export interface Membership {
+  buildingId: string;
+  role: BuildingRole;
+  unitIds: string[];
+  isBuildingAdmin: boolean;
+  linkedOwnerId?: string | null;
+}
 
 export type UserStatus = 'invited' | 'active' | 'suspended';
 

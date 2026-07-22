@@ -1,0 +1,16 @@
+.git
+**/node_modules
+# Mobile app is not part of the server image.
+mobile
+firmware
+# Keep only client's manifest (needed for the npm workspace tree), drop the rest.
+client/**
+!client/package.json
+# Build artifacts and local-only files.
+server/dist
+server/uploads
+**/*.log
+.env
+*.md
+render.yaml
+docker-compose.yml

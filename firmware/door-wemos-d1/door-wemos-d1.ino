@@ -53,12 +53,15 @@
 
 // ─── Configuration ────────────────────────────────────────────────────
 
-const char *WIFI_SSID     = "Absi's Home";
-const char *WIFI_PASSWORD = "Absi@123#";
+const char *WIFI_SSID     = "YOUR_WIFI_SSID";
+const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 const char *WS_HOST   = "building-app-server.onrender.com";
 const uint16_t WS_PORT = 443;
 const bool   WS_USE_TLS = true;
+// Shared device token — must equal the server's DEVICE_WS_TOKEN env var.
+// The server refuses the WS upgrade without a matching token.
+const char *DEVICE_TOKEN = "YOUR_DEVICE_WS_TOKEN";
 static const char *WS_PATH = "/ws/door";
 
 // Wemos D1 Mini pin map: D1 = GPIO5.
@@ -173,10 +176,11 @@ void setup() {
 
   connectWifi();
 
+  String wsPath = String(WS_PATH) + "?token=" + DEVICE_TOKEN;
   if (WS_USE_TLS) {
-    ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
+    ws.beginSSL(WS_HOST, WS_PORT, wsPath.c_str());
   } else {
-    ws.begin(WS_HOST, WS_PORT, WS_PATH);
+    ws.begin(WS_HOST, WS_PORT, wsPath.c_str());
   }
   ws.onEvent(onWsEvent);
   ws.setReconnectInterval(5000);

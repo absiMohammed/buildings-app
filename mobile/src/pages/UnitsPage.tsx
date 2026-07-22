@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -11,72 +12,110 @@ import { PieChart } from 'react-native-gifted-charts';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useAuth, useCurrency } from '../auth/AuthContext';
-import { ACTIONS, EMPTY_CAPABILITIES, hasAction } from '../auth/capabilities';
+import { ACTIONS, hasAction } from '../auth/capabilities';
 import { palette, radii, shadow, spacing, type, textStart } from '../components/theme';
-import { Button, Card, Pill, SectionHeader } from '../components/ui';
+import { Button, Card, EmptyState, Pill, SectionHeader } from '../components/ui';
 import { BottomSheet } from '../components/BottomSheet';
-import { effectiveMonthlyDue, fmtMoney, type MockUnit } from '../mocks/fixtures';
-import { useMockStore } from '../mocks/store';
+import { fmtMoney } from '../utils/format';
+import { createUnit, listUnits, type Unit } from '../api/units';
+import { useApiResource } from '../api/useApiResource';
 import type { AppStackParamList } from '../navigation/types';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 
-type Filter = 'all' | 'occupied' | 'vacant' | 'under_construction';
-
-const statusTone: Record<MockUnit['occupancyStatus'], 'positive' | 'warning' | 'danger'> = {
-  occupied: 'positive',
-  vacant: 'warning',
-  under_construction: 'danger',
-};
-
-const STATUS_KEY: Record<MockUnit['occupancyStatus'], StringKey> = {
-  occupied: 'units_status_occupied',
-  vacant: 'units_status_vacant',
-  under_construction: 'units_status_construction',
-};
+type Filter = 'all' | 'occupied' | 'vacant';
 
 const FILTER_KEY: Record<Filter, StringKey> = {
   all: 'units_filter_all',
   occupied: 'units_filter_occupied',
   vacant: 'units_filter_vacant',
-  under_construction: 'units_filter_construction',
 };
+
+function isOccupied(u: Unit): boolean {
+  return u.occupants.length > 0;
+}
+
+function effectiveDue(u: Unit, buildingDefault: number): number {
+  return u.monthlyDuesAmount ?? buildingDefault;
+}
 
 export function UnitsPage() {
   const [filter, setFilter] = useState<Filter>('all');
   const [modalOpen, setModalOpen] = useState(false);
   const currency = useCurrency();
   const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
-  const { user, building, capabilities: caps } = useAuth();
+  const { building, capabilities: caps } = useAuth();
   const canCreate = hasAction(caps, ACTIONS.UNIT_CREATE);
-  const { units, addUnit } = useMockStore();
   const buildingDefault = building?.settings?.defaultMonthlyDues ?? 0;
   const { t, tf } = useI18n();
 
+  const fetcher = useCallback(() => listUnits(), []);
+  const { data, loading, refreshing, error, refresh, reload } = useApiResource(
+    fetcher,
+    'Could not load units.'
+  );
+  const units = useMemo(() => data ?? [], [data]);
+
   const counts = useMemo(
     () => ({
-      occupied: units.filter((u) => u.occupancyStatus === 'occupied').length,
-      vacant: units.filter((u) => u.occupancyStatus === 'vacant').length,
-      under_construction: units.filter((u) => u.occupancyStatus === 'under_construction').length,
+      occupied: units.filter(isOccupied).length,
+      vacant: units.filter((u) => !isOccupied(u)).length,
     }),
     [units]
   );
 
-  const filtered = filter === 'all' ? units : units.filter((u) => u.occupancyStatus === filter);
-  const totalDue = units
-    .filter((u) => u.occupancyStatus !== 'under_construction')
-    .reduce((s, u) => s + effectiveMonthlyDue(u, buildingDefault), 0);
-  const livableUnits = units.length - counts.under_construction;
-  const occupancyRate = livableUnits > 0 ? Math.round((counts.occupied / livableUnits) * 100) : 0;
+  const filtered =
+    filter === 'all'
+      ? units
+      : filter === 'occupied'
+        ? units.filter(isOccupied)
+        : units.filter((u) => !isOccupied(u));
+  const totalDue = units.reduce((s, u) => s + effectiveDue(u, buildingDefault), 0);
+  const occupancyRate = units.length > 0 ? Math.round((counts.occupied / units.length) * 100) : 0;
 
   const pie = [
     { value: counts.occupied, color: palette.success, text: t('units_status_occupied') },
     { value: counts.vacant, color: palette.warning, text: t('units_status_vacant') },
-    { value: counts.under_construction, color: palette.danger, text: t('units_status_construction') },
   ].filter((d) => d.value > 0);
 
+  async function addUnit(input: {
+    number: string;
+    floor?: number;
+    bedrooms?: number;
+    monthlyDuesAmount?: number;
+  }) {
+    await createUnit(input);
+    setModalOpen(false);
+    await reload();
+  }
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <Text style={type.small}>{t('loading')}</Text>
+      </View>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <View style={styles.center}>
+        <EmptyState
+          iconName="units"
+          title={t('unit_not_found_title')}
+          body={error}
+          action={{ label: t('back'), onPress: () => void refresh() }}
+        />
+      </View>
+    );
+  }
+
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.scroll}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void refresh()} />}
+    >
       <View style={styles.headerRow}>
         <View style={{ flex: 1 }}>
           <Text style={type.caption}>{t('units_occupancy_caps')}</Text>
@@ -84,8 +123,8 @@ export function UnitsPage() {
           <Text style={type.small}>
             {tf('units_occupancy_summary', {
               occupied: counts.occupied,
-              habitable: livableUnits,
-              construction: counts.under_construction,
+              habitable: units.length,
+              construction: 0,
             })}
           </Text>
         </View>
@@ -122,7 +161,7 @@ export function UnitsPage() {
 
       <SectionHeader title={t('units_section_all')} />
       <View style={styles.filterRow}>
-        {(['all', 'occupied', 'vacant', 'under_construction'] as Filter[]).map((f) => (
+        {(['all', 'occupied', 'vacant'] as Filter[]).map((f) => (
           <TouchableOpacity
             key={f}
             onPress={() => setFilter(f)}
@@ -136,44 +175,46 @@ export function UnitsPage() {
         ))}
       </View>
 
-      <View style={styles.grid}>
-        {filtered.map((u) => (
-          <TouchableOpacity
-            key={u._id}
-            style={styles.card}
-            activeOpacity={0.85}
-            onPress={() => navigation.navigate('UnitDetail', { unitNumber: u.number })}
-          >
-            <View style={styles.cardHead}>
-              <Text style={styles.unitNumber}>{u.number}</Text>
-              <Pill label={t(STATUS_KEY[u.occupancyStatus])} tone={statusTone[u.occupancyStatus]} />
-            </View>
-            <Text style={[type.small, { marginTop: 4 }]}>
-              {tf('units_meta_floor', { floor: u.floor, bedrooms: u.bedrooms })}
-            </Text>
-            <Text style={type.small}>{u.ownerName ?? t('units_unassigned')}</Text>
-            <View style={styles.dueRow}>
-              <Text style={type.caption}>{t('units_monthly_caps')}</Text>
-              <Text style={[type.body, { fontWeight: '700' }]}>
-                {fmtMoney(effectiveMonthlyDue(u, buildingDefault), currency)}
-                {u.monthlyDue == null ? <Text style={styles.defaultBadge}>{t('units_default_badge')}</Text> : null}
+      {filtered.length === 0 ? (
+        <EmptyState iconName="units" title={t('payments_empty_default')} body={t('payments_empty_default_body')} />
+      ) : (
+        <View style={styles.grid}>
+          {filtered.map((u) => (
+            <TouchableOpacity
+              key={u._id}
+              style={styles.card}
+              activeOpacity={0.85}
+              onPress={() => navigation.navigate('UnitDetail', { unitNumber: u.number })}
+            >
+              <View style={styles.cardHead}>
+                <Text style={styles.unitNumber}>{u.number}</Text>
+                <Pill
+                  label={t(isOccupied(u) ? 'units_status_occupied' : 'units_status_vacant')}
+                  tone={isOccupied(u) ? 'positive' : 'warning'}
+                />
+              </View>
+              <Text style={[type.small, { marginTop: 4 }]}>
+                {tf('units_meta_floor', { floor: u.floor ?? '—', bedrooms: u.bedrooms ?? 0 })}
               </Text>
-            </View>
-            <Text style={styles.chev}>{t('units_card_view')}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+              <Text style={type.small}>
+                {u.ownerId ? t('role_owner') : t('units_unassigned')}
+              </Text>
+              <View style={styles.dueRow}>
+                <Text style={type.caption}>{t('units_monthly_caps')}</Text>
+                <Text style={[type.body, { fontWeight: '700' }]}>
+                  {fmtMoney(effectiveDue(u, buildingDefault), currency)}
+                  {u.monthlyDuesAmount == null ? <Text style={styles.defaultBadge}>{t('units_default_badge')}</Text> : null}
+                </Text>
+              </View>
+              <Text style={styles.chev}>{t('units_card_view')}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
 
       <View style={{ height: spacing.xl }} />
 
-      <NewUnitModal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
-        onSubmit={(input) => {
-          addUnit(input);
-          setModalOpen(false);
-        }}
-      />
+      <NewUnitModal open={modalOpen} onClose={() => setModalOpen(false)} onSubmit={(input) => void addUnit(input)} />
     </ScrollView>
   );
 }
@@ -185,15 +226,13 @@ function NewUnitModal({
 }: {
   open: boolean;
   onClose: () => void;
-  onSubmit: (input: Omit<MockUnit, '_id'>) => void;
+  onSubmit: (input: { number: string; floor?: number; bedrooms?: number; monthlyDuesAmount?: number }) => void;
 }) {
   const { t } = useI18n();
   const [number, setNumber] = useState('');
   const [floor, setFloor] = useState('');
   const [bedrooms, setBedrooms] = useState('');
   const [monthlyDue, setMonthlyDue] = useState('');
-  const [ownerName, setOwnerName] = useState('');
-  const [status, setStatus] = useState<MockUnit['occupancyStatus']>('vacant');
 
   const floorN = parseInt(floor || '0', 10);
   const bedroomsN = parseInt(bedrooms || '0', 10);
@@ -207,8 +246,6 @@ function NewUnitModal({
     setFloor('');
     setBedrooms('');
     setMonthlyDue('');
-    setOwnerName('');
-    setStatus('vacant');
   }
 
   function submit() {
@@ -217,10 +254,8 @@ function NewUnitModal({
       number: number.trim(),
       floor: floorN,
       bedrooms: bedroomsN,
-      occupancyStatus: status,
-      monthlyDue: dueN,
       // empty input ⇒ inherit building default
-      ownerName: ownerName.trim() || undefined,
+      ...(dueN != null ? { monthlyDuesAmount: dueN } : {}),
     });
     reset();
   }
@@ -228,55 +263,36 @@ function NewUnitModal({
   return (
     <BottomSheet open={open} onClose={onClose}>
       <View>
-          <Text style={[type.title, { marginBottom: spacing.sm }]}>{t('new_unit_title')}</Text>
-          <Text style={[type.small, { marginBottom: spacing.md }]}>{t('new_unit_body')}</Text>
+        <Text style={[type.title, { marginBottom: spacing.sm }]}>{t('new_unit_title')}</Text>
+        <Text style={[type.small, { marginBottom: spacing.md }]}>{t('new_unit_body')}</Text>
 
-          <View style={{ flexDirection: 'row', gap: spacing.md }}>
-            <View style={{ flex: 1 }}>
-              <Text style={modalStyles.label}>{t('new_unit_number')}</Text>
-              <TextInput value={number} onChangeText={setNumber} placeholder={t('new_unit_number_ph')} placeholderTextColor={palette.textSubtle} style={modalStyles.input} autoCapitalize="characters" />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={modalStyles.label}>{t('new_unit_floor')}</Text>
-              <TextInput value={floor} onChangeText={setFloor} keyboardType="number-pad" placeholder="9" placeholderTextColor={palette.textSubtle} style={modalStyles.input} />
-            </View>
+        <View style={{ flexDirection: 'row', gap: spacing.md }}>
+          <View style={{ flex: 1 }}>
+            <Text style={modalStyles.label}>{t('new_unit_number')}</Text>
+            <TextInput value={number} onChangeText={setNumber} placeholder={t('new_unit_number_ph')} placeholderTextColor={palette.textSubtle} style={modalStyles.input} autoCapitalize="characters" />
           </View>
-
-          <View style={{ flexDirection: 'row', gap: spacing.md }}>
-            <View style={{ flex: 1 }}>
-              <Text style={modalStyles.label}>{t('new_unit_bedrooms')}</Text>
-              <TextInput value={bedrooms} onChangeText={setBedrooms} keyboardType="number-pad" placeholder="2" placeholderTextColor={palette.textSubtle} style={modalStyles.input} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={modalStyles.label}>{t('new_unit_dues')}</Text>
-              <TextInput value={monthlyDue} onChangeText={setMonthlyDue} keyboardType="decimal-pad" placeholder={t('new_unit_dues_ph')} placeholderTextColor={palette.textSubtle} style={modalStyles.input} />
-            </View>
-          </View>
-
-          <Text style={modalStyles.label}>{t('new_unit_owner')}</Text>
-          <TextInput value={ownerName} onChangeText={setOwnerName} placeholder={t('new_unit_owner_ph')} placeholderTextColor={palette.textSubtle} style={modalStyles.input} autoCapitalize="words" />
-
-          <Text style={modalStyles.label}>{t('new_unit_initial_status')}</Text>
-          <View style={modalStyles.chipRow}>
-            {(['occupied', 'vacant', 'under_construction'] as const).map((s) => (
-              <TouchableOpacity
-                key={s}
-                onPress={() => setStatus(s)}
-                style={[modalStyles.chip, status === s && modalStyles.chipActive]}
-                activeOpacity={0.85}
-              >
-                <Text style={[modalStyles.chipText, status === s && modalStyles.chipTextActive]}>
-                  {t(STATUS_KEY[s])}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <View style={modalStyles.actions}>
-            <Button label={t('cancel')} variant="secondary" onPress={() => { reset(); onClose(); }} style={{ flex: 1 }} />
-            <Button label={t('new_unit_add')} onPress={submit} disabled={!valid} style={{ flex: 1 }} />
+          <View style={{ flex: 1 }}>
+            <Text style={modalStyles.label}>{t('new_unit_floor')}</Text>
+            <TextInput value={floor} onChangeText={setFloor} keyboardType="number-pad" placeholder="9" placeholderTextColor={palette.textSubtle} style={modalStyles.input} />
           </View>
         </View>
+
+        <View style={{ flexDirection: 'row', gap: spacing.md }}>
+          <View style={{ flex: 1 }}>
+            <Text style={modalStyles.label}>{t('new_unit_bedrooms')}</Text>
+            <TextInput value={bedrooms} onChangeText={setBedrooms} keyboardType="number-pad" placeholder="2" placeholderTextColor={palette.textSubtle} style={modalStyles.input} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={modalStyles.label}>{t('new_unit_dues')}</Text>
+            <TextInput value={monthlyDue} onChangeText={setMonthlyDue} keyboardType="decimal-pad" placeholder={t('new_unit_dues_ph')} placeholderTextColor={palette.textSubtle} style={modalStyles.input} />
+          </View>
+        </View>
+
+        <View style={modalStyles.actions}>
+          <Button label={t('cancel')} variant="secondary" onPress={() => { reset(); onClose(); }} style={{ flex: 1 }} />
+          <Button label={t('new_unit_add')} onPress={submit} disabled={!valid} style={{ flex: 1 }} />
+        </View>
+      </View>
     </BottomSheet>
   );
 }
@@ -284,6 +300,7 @@ function NewUnitModal({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
   scroll: { padding: spacing.lg, paddingBottom: 120 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.md },
   statsCardRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   legend: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.sm, flexWrap: 'wrap' },
@@ -325,17 +342,5 @@ const modalStyles = StyleSheet.create({
     color: palette.text,
     backgroundColor: palette.inputBg,    ...textStart,
   },
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: radii.pill,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.surfaceMuted,
-  },
-  chipActive: { backgroundColor: palette.accent, borderColor: palette.accent },
-  chipText: { fontSize: 12, color: palette.textMuted, textTransform: 'capitalize', fontWeight: '500' },
-  chipTextActive: { color: '#fff', fontWeight: '600' },
   actions: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.lg },
 });

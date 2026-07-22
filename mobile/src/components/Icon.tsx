@@ -1,0 +1,103 @@
+import {
+  AlertTriangle,
+  ArrowUpDown,
+  Bell,
+  Building2,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  CreditCard,
+  DoorOpen,
+  FileText,
+  Fence,
+  Fingerprint,
+  KeyRound,
+  MessageCircle,
+  SlidersHorizontal,
+  Home,
+  ScanFace,
+  LogOut,
+  MapPin,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Power,
+  Receipt,
+  Search,
+  Settings,
+  Shield,
+  Tags,
+  Trash2,
+  User,
+  Users,
+  Vote,
+  Wrench,
+  X,
+  Zap,
+  type LucideIcon,
+} from 'lucide-react-native';
+import { palette } from './theme';
+
+// Semantic name → lucide icon. Keeps call sites decoupled from the library and
+// gives us one place to swap the icon set. All icons are stroke (symbolic),
+// never emoji or raster images.
+const ICONS = {
+  home: Home,
+  payments: CreditCard,
+  expenses: Receipt,
+  polls: Vote,
+  maintenance: Wrench,
+  documents: FileText,
+  units: Building2,
+  buildings: Building2,
+  users: Users,
+  user: User,
+  household: Home,
+  settings: Settings,
+  logout: LogOut,
+  more: MoreHorizontal,
+  door: DoorOpen,
+  gate: Fence,
+  elevator: ArrowUpDown,
+  search: Search,
+  close: X,
+  add: Plus,
+  check: Check,
+  location: MapPin,
+  bell: Bell,
+  shield: Shield,
+  trash: Trash2,
+  chevronDown: ChevronDown,
+  chevronUp: ChevronUp,
+  chevronLeft: ChevronLeft,
+  chevronRight: ChevronRight,
+  pricing: Tags,
+  quick: Zap,
+  faceId: ScanFace,
+  fingerprint: Fingerprint,
+  edit: Pencil,
+  power: Power,
+  warning: AlertTriangle,
+  filter: SlidersHorizontal,
+  message: MessageCircle,
+  key: KeyRound,
+} satisfies Record<string, LucideIcon>;
+
+export type IconName = keyof typeof ICONS;
+
+export function Icon({
+  name,
+  size = 22,
+  color = palette.text,
+  strokeWidth = 2,
+}: {
+  name: IconName;
+  size?: number;
+  color?: string;
+  strokeWidth?: number;
+}) {
+  const Cmp = ICONS[name];
+  return <Cmp size={size} color={color} strokeWidth={strokeWidth} />;
+}

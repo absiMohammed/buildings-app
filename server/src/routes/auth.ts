@@ -12,6 +12,7 @@ import {
   logout,
   logoutAll,
   acceptInvite,
+  switchActiveBuilding,
 } from '../services/auth.service.js';
 import { authenticate, type AuthedRequest } from '../middleware/auth.js';
 import { verifyRefreshToken } from '../utils/jwt.js';
@@ -56,6 +57,22 @@ router.post(
   asyncHandler(async (req, res) => {
     await logout((req as AuthedRequest).user.sub);
     res.json({ ok: true });
+  })
+);
+
+// Switch which building the session is scoped to (for users who belong to
+// several). Re-mints the access token for the chosen membership.
+router.post(
+  '/switch-building',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const { buildingId } = req.body as { buildingId?: string };
+    if (!buildingId) throw Unauthorized('buildingId is required');
+    const result = await switchActiveBuilding((req as AuthedRequest).user.sub, buildingId);
+    res.json({
+      user: await toUserPayload(result.user, buildingId),
+      accessToken: result.accessToken,
+    });
   })
 );
 

@@ -34,6 +34,23 @@ const BuildingSchema = new Schema(
         lat: { type: Number, default: null, min: -90, max: 90 },
         lng: { type: Number, default: null, min: -180, max: 180 },
       },
+      // Admin-configurable building access controls. `enabled` shows/hides
+      // the control in the app (and is enforced on the trigger endpoints);
+      // `label` overrides the default name shown to residents.
+      access: {
+        gate: {
+          enabled: { type: Boolean, default: true },
+          label: { type: String, default: '' },
+        },
+        door: {
+          enabled: { type: Boolean, default: true },
+          label: { type: String, default: '' },
+        },
+        elevator: {
+          enabled: { type: Boolean, default: false },
+          label: { type: String, default: '' },
+        },
+      },
     },
     // Optional ESP-01 (or similar) gate controller paired to this building.
     // The plaintext token is shown once at provisioning; we only persist the

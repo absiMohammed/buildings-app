@@ -33,8 +33,8 @@
 // ─── Configuration ────────────────────────────────────────────────────────
 
 // Wi-Fi
-const char *WIFI_SSID     = "Absi's Home";
-const char *WIFI_PASSWORD = "Absi@123#";
+const char *WIFI_SSID     = "YOUR_WIFI_SSID";
+const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 // Backend (Render)
 const char *WS_HOST   = "building-app-server.onrender.com";
@@ -58,6 +58,8 @@ const bool     LED_ACTIVE_HIGH = false; // most ESP-01 onboard LEDs are active-l
 WebSocketsClient ws;
 uint32_t lastWifiAttemptMs = 0;
 
+// Shared device token — must equal the server's DEVICE_WS_TOKEN env var.
+const char *DEVICE_TOKEN = "YOUR_DEVICE_WS_TOKEN";
 static const char *WS_PATH = "/ws/gate";
 
 static void setLed(bool on) {
@@ -151,10 +153,11 @@ void setup() {
   // Render terminates TLS — use ws.beginSSL for wss://, ws.begin for ws://.
   // beginSSL with no fingerprint defaults to insecure on ESP8266, which
   // is fine for now: traffic is still encrypted, just not pinned.
+  String wsPath = String(WS_PATH) + "?token=" + DEVICE_TOKEN;
   if (WS_USE_TLS) {
-    ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
+    ws.beginSSL(WS_HOST, WS_PORT, wsPath.c_str());
   } else {
-    ws.begin(WS_HOST, WS_PORT, WS_PATH);
+    ws.begin(WS_HOST, WS_PORT, wsPath.c_str());
   }
   ws.onEvent(onWsEvent);
   ws.setReconnectInterval(5000);   // try again every 5s after a disconnect

@@ -1,133 +1,137 @@
-import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useMemo, useState } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useAuth, type Role } from '../auth/AuthContext';
-import { ACTIONS, EMPTY_CAPABILITIES, hasAction } from '../auth/capabilities';
-import { palette, radii, shadow, spacing, type } from '../components/theme';
+import { useAuth } from '../auth/AuthContext';
+import { ACTIONS, hasAction } from '../auth/capabilities';
+import { Icon, type IconName } from '../components/Icon';
+import { palette, shadow, spacing, type } from '../components/theme';
 import { Button, Card, EmptyState, IconCircle, Pill, SectionHeader } from '../components/ui';
-import { relativeDay, type MockTicket } from '../mocks/fixtures';
-import { useMockStore } from '../mocks/store';
+import { relativeDay } from '../utils/format';
+import {
+  listMaintenance,
+  updateMaintenance,
+  type MaintenanceCategory,
+  type MaintenancePriority,
+  type MaintenanceRequest,
+  type MaintenanceStatus,
+} from '../api/maintenance';
+import { apiErrorMessage, useApiResource } from '../api/useApiResource';
 import { NewTicketModal } from '../components/NewTicketModal';
+import { useConfirm } from '../components/ConfirmProvider';
 import { TAB_BAR_HEIGHT } from '../components/BottomTabBar';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 
-const categoryGlyph: Record<MockTicket['category'], string> = {
-  plumbing: '🚿',
-  electrical: '⚡',
-  hvac: '❄️',
-  general: '🛠️',
+const categoryIcon: Record<MaintenanceCategory, IconName> = {
+  plumbing: 'maintenance',
+  electrical: 'quick',
+  elevator: 'elevator',
+  common_area: 'buildings',
+  other: 'more',
 };
 
-const priorityTone: Record<MockTicket['priority'], 'danger' | 'warning' | 'neutral'> = {
+const priorityTone: Record<MaintenancePriority, 'danger' | 'warning' | 'neutral'> = {
+  urgent: 'danger',
   high: 'danger',
-  medium: 'warning',
+  normal: 'warning',
   low: 'neutral',
 };
 
-const statusTone: Record<MockTicket['status'], 'warning' | 'accent' | 'positive' | 'neutral' | 'danger'> = {
-  submitted: 'accent',
-  rejected: 'danger',
+const statusTone: Record<MaintenanceStatus, 'warning' | 'accent' | 'positive' | 'neutral'> = {
   open: 'warning',
   in_progress: 'accent',
   resolved: 'positive',
   closed: 'neutral',
 };
 
-const STATUS_KEY: Record<MockTicket['status'], StringKey> = {
-  submitted: 'ticket_submitted',
-  rejected: 'ticket_rejected',
+const STATUS_KEY: Record<MaintenanceStatus, StringKey> = {
   open: 'ticket_open',
   in_progress: 'ticket_in_progress',
   resolved: 'ticket_resolved',
   closed: 'ticket_closed',
 };
 
-const CATEGORY_KEY: Record<MockTicket['category'], StringKey> = {
+// The strings file only carries plumbing/electrical labels; the remaining
+// server categories reuse the closest existing generic keys.
+const CATEGORY_KEY: Record<MaintenanceCategory, StringKey> = {
   plumbing: 'tcat_plumbing',
   electrical: 'tcat_electrical',
-  hvac: 'tcat_hvac',
-  general: 'tcat_general',
+  elevator: 'qa_elevator_title',
+  common_area: 'maint_place_common',
+  other: 'sub_method_other',
 };
 
-const PRIORITY_KEY: Record<MockTicket['priority'], StringKey> = {
+// Server has four priorities; the strings file has three labels, so 'urgent'
+// borrows the 'high' label (no dedicated key, and it shares the danger tone).
+const PRIORITY_KEY: Record<MaintenancePriority, StringKey> = {
+  urgent: 'maint_priority_high',
   high: 'maint_priority_high',
-  medium: 'maint_priority_medium',
+  normal: 'maint_priority_medium',
   low: 'maint_priority_low',
 };
+
+function isActive(s: MaintenanceStatus): boolean {
+  return s === 'open' || s === 'in_progress';
+}
 
 export function MaintenancePage() {
   const insets = useSafeAreaInsets();
   const { user, capabilities: caps } = useAuth();
-  const role = (user?.role ?? 'renter') as Role;
   const canCreate = hasAction(caps, ACTIONS.TICKET_CREATE);
-  const canApprove = hasAction(caps, ACTIONS.TICKET_APPROVE);
   const canResolve = hasAction(caps, ACTIONS.TICKET_RESOLVE);
-  const { tickets, users, createTicket, approveTicket, rejectTicket, setTicketStatus } = useMockStore();
   const [reportOpen, setReportOpen] = useState(false);
   const { t, tf } = useI18n();
+  const { confirm } = useConfirm();
 
-  const myEmail = user?.email ?? '';
-  const myUnit = useMemo(
-    () => users.find((u) => u.email.toLowerCase() === myEmail.toLowerCase())?.unit,
-    [users, myEmail]
+  const { data, loading, refreshing, error, refresh, reload } = useApiResource(
+    listMaintenance,
+    'Could not load maintenance requests.',
   );
 
-  // ----- Per-role bucketing -----
+  const tickets = useMemo(() => data ?? [], [data]);
+  const myId = user?._id ?? '';
+  const myUnitId = user?.unit?._id ?? null;
+  const myUnitNumber = user?.unit?.number ?? null;
+
   const buckets = useMemo(() => {
-    const mine = tickets.filter((t) => t.reporterEmail.toLowerCase() === myEmail.toLowerCase());
+    const active = tickets.filter((x) => isActive(x.status));
+    const done = tickets.filter((x) => !isActive(x.status));
+    const mine = tickets.filter((x) => x.filedBy === myId);
+    return { active, done, mine };
+  }, [tickets, myId]);
 
-    if (role === 'admin') {
-      const pendingApproval = tickets.filter((t) => t.status === 'submitted');
-      const buildingActive = tickets.filter(
-        (t) => t.scope === 'common' && (t.status === 'open' || t.status === 'in_progress')
-      );
-      const buildingDone = tickets.filter(
-        (t) => t.scope === 'common' && (t.status === 'resolved' || t.status === 'closed' || t.status === 'rejected')
-      );
-      return { pendingApproval, buildingActive, buildingDone, mine };
+  function placeLabel(unitId: string | null): string {
+    if (!unitId) return t('maint_place_common');
+    if (myUnitId && unitId === myUnitId && myUnitNumber) {
+      return tf('maint_place_unit', { n: myUnitNumber });
     }
-
-    if (role === 'owner') {
-      const myUnitActive = tickets.filter(
-        (t) =>
-          t.scope === 'unit' &&
-          t.unit === myUnit &&
-          (t.status === 'open' || t.status === 'in_progress')
-      );
-      const myUnitDone = tickets.filter(
-        (t) => t.scope === 'unit' && t.unit === myUnit && (t.status === 'resolved' || t.status === 'closed')
-      );
-      return { myUnitActive, myUnitDone, mine };
-    }
-
-    // renter / dependent — see only their own submissions
-    return { mine };
-  }, [tickets, role, myEmail, myUnit]);
-
-  function confirmReject(ticket: MockTicket) {
-    Alert.alert(
-      t('maint_reject_title'),
-      tf('maint_reject_body', { title: ticket.title }),
-      [
-        { text: t('cancel'), style: 'cancel' },
-        { text: t('reject'), style: 'destructive', onPress: () => rejectTicket(ticket._id) },
-      ]
-    );
+    // Other units aren't populated with a number in the payload.
+    return tf('maint_place_unit', { n: '—' });
   }
 
-  function changeStatus(ticket: MockTicket) {
-    const opts: { text: string; status?: MockTicket['status']; style?: 'cancel' | 'destructive' }[] = [
-      { text: t('cancel'), style: 'cancel' },
-    ];
-    if (ticket.status !== 'in_progress') opts.unshift({ text: t('maint_status_in_progress'), status: 'in_progress' });
-    if (ticket.status !== 'resolved') opts.unshift({ text: t('maint_status_resolved'), status: 'resolved' });
-    if (ticket.status === 'resolved') opts.unshift({ text: t('maint_status_reopen'), status: 'open' });
-    Alert.alert(ticket.title, t('maint_status_alert_body'), opts.map((o) => ({
-      text: o.text,
-      style: o.style,
-      onPress: o.status ? () => setTicketStatus(ticket._id, o.status!) : undefined,
-    })));
+  async function applyStatus(ticket: MaintenanceRequest, status: MaintenanceStatus) {
+    try {
+      await updateMaintenance(ticket._id, { status });
+      await reload();
+    } catch (e) {
+      await confirm({ title: ticket.title, message: apiErrorMessage(e, 'Could not update ticket.') });
+    }
+  }
+
+  async function changeStatus(ticket: MaintenanceRequest) {
+    const opts: { text: string; status: MaintenanceStatus }[] = [];
+    if (ticket.status !== 'in_progress') opts.push({ text: t('maint_status_in_progress'), status: 'in_progress' });
+    if (ticket.status !== 'resolved') opts.push({ text: t('maint_status_resolved'), status: 'resolved' });
+    if (ticket.status === 'resolved') opts.push({ text: t('ticket_closed'), status: 'closed' });
+    if (ticket.status === 'resolved' || ticket.status === 'closed') {
+      opts.push({ text: t('maint_status_reopen'), status: 'open' });
+    }
+    for (const o of opts) {
+      if (await confirm({ title: ticket.title, message: t('maint_status_alert_body'), confirmLabel: o.text })) {
+        await applyStatus(ticket, o.status);
+        return;
+      }
+    }
   }
 
   function reportPressed() {
@@ -135,89 +139,56 @@ export function MaintenancePage() {
     setReportOpen(true);
   }
 
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <Text style={type.small}>{t('loading')}</Text>
+      </View>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <View style={styles.center}>
+        <EmptyState
+          iconName="maintenance"
+          title={error}
+          action={{ label: t('back'), onPress: () => void refresh() }}
+        />
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scroll}>
-        {/* Admin moderation queue */}
-        {canApprove && (buckets as any).pendingApproval !== undefined && (
-          <>
-            <SectionHeader title={tf('maint_section_pending', { count: (buckets as any).pendingApproval.length })} />
-            {(buckets as any).pendingApproval.length === 0 ? (
-              <Card><Text style={type.small}>{t('maint_nothing_waiting')}</Text></Card>
-            ) : (
-              <View style={{ gap: spacing.md }}>
-                {(buckets as any).pendingApproval.map((ticket: MockTicket) => (
-                  <TicketCard
-                    key={ticket._id}
-                    ticket={ticket}
-                    reporterName={nameFor(ticket.reporterEmail, users)}
-                    extra={
-                      <View style={styles.actionsRow}>
-                        <Button label={t('reject')} variant="secondary" onPress={() => confirmReject(ticket)} style={{ flex: 1 }} />
-                        <Button label={t('approve')} onPress={() => approveTicket(ticket._id)} style={{ flex: 1 }} />
-                      </View>
-                    }
-                  />
-                ))}
-              </View>
-            )}
-          </>
-        )}
-
-        {/* Owner: my unit */}
-        {role === 'owner' && (
-          <>
-            <SectionHeader title={tf('maint_section_active_in_unit', { unit: myUnit ?? '—' })} />
-            {((buckets as any).myUnitActive ?? []).length === 0 ? (
-              <Card><Text style={type.small}>{t('maint_no_active_unit')}</Text></Card>
-            ) : (
-              <View style={{ gap: spacing.md }}>
-                {((buckets as any).myUnitActive as MockTicket[]).map((ticket) => (
-                  <TicketCard
-                    key={ticket._id}
-                    ticket={ticket}
-                    reporterName={nameFor(ticket.reporterEmail, users)}
-                    extra={
-                      canResolve ? (
-                        <View style={styles.actionsRow}>
-                          <Button label={t('update_status')} variant="secondary" onPress={() => changeStatus(ticket)} style={{ flex: 1 }} />
-                        </View>
-                      ) : null
-                    }
-                  />
-                ))}
-              </View>
-            )}
-
-            {((buckets as any).myUnitDone ?? []).length > 0 && (
-              <>
-                <SectionHeader title={t('maint_section_done')} />
-                <View style={{ gap: spacing.md }}>
-                  {((buckets as any).myUnitDone as MockTicket[]).map((ticket) => (
-                    <TicketCard key={ticket._id} ticket={ticket} reporterName={nameFor(ticket.reporterEmail, users)} />
-                  ))}
-                </View>
-              </>
-            )}
-          </>
-        )}
-
-        {/* Admin: building section */}
-        {canResolve && role === 'admin' && (
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void refresh()} />}
+      >
+        {/* Admin: everything in the building, movable through the status flow. */}
+        {canResolve && (
           <>
             <SectionHeader title={t('maint_section_building_active')} />
-            {((buckets as any).buildingActive ?? []).length === 0 ? (
-              <Card><Text style={type.small}>{t('maint_all_clear')}</Text></Card>
+            {buckets.active.length === 0 ? (
+              <Card>
+                <Text style={type.small}>{t('maint_all_clear')}</Text>
+              </Card>
             ) : (
               <View style={{ gap: spacing.md }}>
-                {((buckets as any).buildingActive as MockTicket[]).map((ticket) => (
+                {buckets.active.map((ticket) => (
                   <TicketCard
                     key={ticket._id}
                     ticket={ticket}
-                    reporterName={nameFor(ticket.reporterEmail, users)}
+                    place={placeLabel(ticket.unitId)}
+                    reporterName={ticket.filedBy === myId ? t('maint_reporter_you') : null}
                     extra={
                       <View style={styles.actionsRow}>
-                        <Button label={t('update_status')} variant="secondary" onPress={() => changeStatus(ticket)} style={{ flex: 1 }} />
+                        <Button
+                          label={t('update_status')}
+                          variant="secondary"
+                          onPress={() => void changeStatus(ticket)}
+                          style={{ flex: 1 }}
+                        />
                       </View>
                     }
                   />
@@ -225,12 +196,27 @@ export function MaintenancePage() {
               </View>
             )}
 
-            {((buckets as any).buildingDone ?? []).length > 0 && (
+            {buckets.done.length > 0 && (
               <>
                 <SectionHeader title={t('maint_section_building_history')} />
                 <View style={{ gap: spacing.md }}>
-                  {((buckets as any).buildingDone as MockTicket[]).map((ticket) => (
-                    <TicketCard key={ticket._id} ticket={ticket} reporterName={nameFor(ticket.reporterEmail, users)} />
+                  {buckets.done.map((ticket) => (
+                    <TicketCard
+                      key={ticket._id}
+                      ticket={ticket}
+                      place={placeLabel(ticket.unitId)}
+                      reporterName={ticket.filedBy === myId ? t('maint_reporter_you') : null}
+                      extra={
+                        <View style={styles.actionsRow}>
+                          <Button
+                            label={t('update_status')}
+                            variant="secondary"
+                            onPress={() => void changeStatus(ticket)}
+                            style={{ flex: 1 }}
+                          />
+                        </View>
+                      }
+                    />
                   ))}
                 </View>
               </>
@@ -238,18 +224,19 @@ export function MaintenancePage() {
           </>
         )}
 
-        {/* Everyone: my submissions */}
+        {/* Everyone: the tickets I filed. */}
         <SectionHeader title={t('maint_section_my_reports')} />
-        {(buckets.mine ?? []).length === 0 ? (
-          <EmptyState
-            icon="🛠️"
-            title={t('maint_no_reports')}
-            body={t('maint_no_reports_body')}
-          />
+        {buckets.mine.length === 0 ? (
+          <EmptyState iconName="maintenance" title={t('maint_no_reports')} body={t('maint_no_reports_body')} />
         ) : (
           <View style={{ gap: spacing.md }}>
-            {(buckets.mine as MockTicket[]).map((ticket) => (
-              <TicketCard key={ticket._id} ticket={ticket} reporterName={t('maint_reporter_you')} />
+            {buckets.mine.map((ticket) => (
+              <TicketCard
+                key={ticket._id}
+                ticket={ticket}
+                place={placeLabel(ticket.unitId)}
+                reporterName={t('maint_reporter_you')}
+              />
             ))}
           </View>
         )}
@@ -263,7 +250,7 @@ export function MaintenancePage() {
           activeOpacity={0.9}
           onPress={reportPressed}
         >
-          <Text style={styles.fabIcon}>＋</Text>
+          <Icon name="add" size={18} color="#fff" />
           <Text style={styles.fabLabel}>{t('new_report_label')}</Text>
         </TouchableOpacity>
       )}
@@ -271,51 +258,43 @@ export function MaintenancePage() {
       <NewTicketModal
         open={reportOpen}
         onClose={() => setReportOpen(false)}
-        defaultUnit={myUnit ?? undefined}
-        forbidUnitScope={!myUnit}
-        onSubmit={(input) => {
-          createTicket({ ...input, reporterEmail: myEmail });
+        unit={user?.unit ?? null}
+        onCreated={() => {
           setReportOpen(false);
+          void reload();
         }}
       />
     </View>
   );
 }
 
-function nameFor(email: string, users: ReturnType<typeof useMockStore>['users']): string {
-  const u = users.find((x) => x.email.toLowerCase() === email.toLowerCase());
-  if (!u) return email;
-  return `${u.firstName} ${u.lastName[0]}.`;
-}
-
 function TicketCard({
   ticket,
+  place,
   reporterName,
   extra,
 }: {
-  ticket: MockTicket;
-  reporterName: string;
+  ticket: MaintenanceRequest;
+  place: string;
+  reporterName: string | null;
   extra?: React.ReactNode;
 }) {
   const { t, tf } = useI18n();
-  const place = ticket.scope === 'unit' ? tf('maint_place_unit', { n: ticket.unit }) : t('maint_place_common');
+  const meta = reporterName
+    ? tf('maint_meta_line', { place, relative: relativeDay(ticket.createdAt), name: reporterName })
+    : `${place} · ${relativeDay(ticket.createdAt)}`;
   return (
     <Card>
       <View style={styles.row}>
-        <IconCircle glyph={categoryGlyph[ticket.category]} tone={priorityTone[ticket.priority]} />
+        <IconCircle iconName={categoryIcon[ticket.category]} tone={priorityTone[ticket.priority]} />
         <View style={{ flex: 1 }}>
           <Text style={[type.body, { fontWeight: '600' }]}>{ticket.title}</Text>
-          <Text style={type.small}>
-            {tf('maint_meta_line', { place, relative: relativeDay(ticket.createdAt), name: reporterName })}
-          </Text>
+          <Text style={type.small}>{meta}</Text>
         </View>
         <Pill label={t(STATUS_KEY[ticket.status])} tone={statusTone[ticket.status]} />
       </View>
-      <Text style={[type.small, { marginTop: spacing.sm }]}>{ticket.description}</Text>
-      {ticket.status === 'rejected' && ticket.rejectionReason ? (
-        <Text style={[type.small, { color: palette.danger, marginTop: 4 }]}>
-          {tf('maint_reason_prefix', { reason: ticket.rejectionReason })}
-        </Text>
+      {ticket.description ? (
+        <Text style={[type.small, { marginTop: spacing.sm }]}>{ticket.description}</Text>
       ) : null}
       <View style={styles.metaRow}>
         <Pill label={t(PRIORITY_KEY[ticket.priority])} tone={priorityTone[ticket.priority]} />
@@ -329,6 +308,7 @@ function TicketCard({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
   scroll: { padding: spacing.lg, paddingBottom: 120 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   row: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   metaRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },
   actionsRow: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.md },
@@ -345,6 +325,5 @@ const styles = StyleSheet.create({
     gap: 6,
     ...shadow,
   },
-  fabIcon: { color: '#fff', fontSize: 18, fontWeight: '700' },
   fabLabel: { color: '#fff', fontWeight: '600' },
 });

@@ -1,19 +1,23 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  Alert,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import { Linking, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useRoute, type RouteProp } from '@react-navigation/native';
 import { api } from '../api/client';
-import { Avatar, Button, Card, EmptyState, Pill } from '../components/ui';
-import { InviteModal, type InviteUnitOption } from '../components/InviteModal';
-import { palette, radii, spacing, type, textStart } from '../components/theme';
+import { setBuildingAdmin, resetUserPassword, getUserLoginLink } from '../api/users';
+import { listBuildingUnits, type Unit } from '../api/units';
+import { Avatar, Card, EmptyState, Notice, Pill, PhoneText } from '../components/ui';
+import { CreateUserModal } from '../components/CreateUserModal';
+import { EditUserModal } from '../components/EditUserModal';
+import { UserActionSheet, type UserSheetItem } from '../components/UserActionSheet';
+import {
+  ListToolbar,
+  SearchField,
+  FilterSheet,
+  isFilterActive,
+  type FilterGroup,
+  type FilterValue,
+} from '../components/ListChrome';
+import { useConfirm } from '../components/ConfirmProvider';
+import { formatPhone, ltrPhone, palette, radii, spacing, type } from '../components/theme';
 import { useI18n } from '../i18n';
 import type { Role } from '../auth/AuthContext';
 import type { StringKey } from '../i18n/strings';
@@ -22,6 +26,7 @@ import type { AppStackParamList } from '../navigation/types';
 interface AdminUser {
   _id: string;
   email: string;
+  phone: string;
   firstName?: string;
   lastName?: string;
   role: Role;
@@ -30,16 +35,12 @@ interface AdminUser {
   isBuildingAdmin?: boolean;
 }
 
-interface AdminUnit {
-  _id: string;
-  number: string;
-}
-
 const ROLE_KEY: Record<Role, StringKey> = {
   admin: 'role_admin',
   owner: 'role_owner',
   renter: 'role_renter',
   dependent: 'role_dependent',
+  independent: 'role_independent',
 };
 
 const STATUS_KEY: Record<AdminUser['status'], StringKey> = {
@@ -53,6 +54,7 @@ const roleTone: Record<Role, 'accent' | 'positive' | 'warning' | 'neutral'> = {
   owner: 'positive',
   renter: 'warning',
   dependent: 'neutral',
+  independent: 'neutral',
 };
 
 const statusTone: Record<AdminUser['status'], 'positive' | 'accent' | 'danger'> = {
@@ -61,34 +63,47 @@ const statusTone: Record<AdminUser['status'], 'positive' | 'accent' | 'danger'> 
   suspended: 'danger',
 };
 
+// Roles a resident row can carry within a building (super-admin never lives
+// in a building, so it is intentionally absent from the filter).
+const BUILDING_ROLES: Role[] = ['owner', 'renter', 'dependent', 'independent'];
+const STATUSES: AdminUser['status'][] = ['active', 'invited', 'suspended'];
+
 /**
- * Per-building user list. The admin lands here from BuildingsPage and can
- * invite new residents (admin must specify the target building, which this
- * page injects into InviteModal) and toggle status / kick / promote.
+ * Per-building user list. Shares the buildings-screen architecture: a compact
+ * toolbar (count + filter + add), search field, multi-criteria filter sheet,
+ * a tap-to-open action sheet per row.
  */
 export function BuildingUsersPage() {
   const route = useRoute<RouteProp<AppStackParamList, 'BuildingUsers'>>();
   const { t, tf } = useI18n();
+  const { confirm } = useConfirm();
   const buildingId = route.params?.buildingId;
   const buildingName = route.params?.buildingName ?? '';
+  // When arrived from a specific unit, scope the roster + the add flow to it.
+  const unitId = route.params?.unitId;
+  const unitNumber = route.params?.unitNumber;
 
   const [users, setUsers] = useState<AdminUser[]>([]);
-  const [units, setUnits] = useState<AdminUnit[]>([]);
+  const [units, setUnits] = useState<Unit[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState('');
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [actionTarget, setActionTarget] = useState<AdminUser | null>(null);
+  const [editTarget, setEditTarget] = useState<AdminUser | null>(null);
+  const [filters, setFilters] = useState<FilterValue>({});
+  const [filterOpen, setFilterOpen] = useState(false);
 
   const fetch = useCallback(async () => {
     setError(null);
     try {
-      const [usersR, unitsR] = await Promise.all([
+      const [usersR, unitsList] = await Promise.all([
         api.get(`/buildings/${buildingId}/users`),
-        api.get(`/buildings/${buildingId}/units`),
+        buildingId ? listBuildingUnits(buildingId).catch(() => [] as Unit[]) : Promise.resolve([] as Unit[]),
       ]);
       setUsers((usersR.data?.users ?? []) as AdminUser[]);
-      setUnits((unitsR.data?.units ?? []) as AdminUnit[]);
+      setUnits(unitsList);
     } catch (e) {
       const msg = (e as { response?: { data?: { error?: { message?: string } } } })
         ?.response?.data?.error?.message;
@@ -103,38 +118,92 @@ export function BuildingUsersPage() {
     void fetch();
   }, [fetch]);
 
-  // The system admin's invite flow is intentionally narrow: they can only
-  // appoint the building's admin (one owner with `isBuildingAdmin`). Once
-  // an admin exists for this building, the invite button hides — all
-  // subsequent invites are the building admin's responsibility.
   const hasBuildingAdmin = useMemo(
     () => users.some((u) => u.role === 'owner' && u.isBuildingAdmin && u.status !== 'suspended'),
-    [users]
+    [users],
   );
 
-  // Compute slot signals per unit so InviteModal can disable taken roles.
-  const inviteUnits: InviteUnitOption[] = useMemo(() => {
-    return units.map((u) => {
-      const occupants = users.filter((x) => x.unitId === u._id && x.status !== 'suspended');
-      return {
-        _id: u._id,
-        number: u.number,
-        hasOwner: occupants.some((x) => x.role === 'owner'),
-        hasRenter: occupants.some((x) => x.role === 'renter'),
-      };
-    });
-  }, [users, units]);
+  const unitNumberById = useMemo(() => {
+    const m = new Map<string, string>();
+    units.forEach((u) => m.set(u._id, u.number));
+    return m;
+  }, [units]);
+
+  const roleF = filters.role ?? 'all';
+  const statusF = filters.status ?? 'all';
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return users;
-    return users.filter(
-      (u) =>
+    return users.filter((u) => {
+      if (unitId && u.unitId !== unitId) return false;
+      if (roleF !== 'all' && u.role !== roleF) return false;
+      if (statusF !== 'all' && u.status !== statusF) return false;
+      if (!q) return true;
+      return (
         (u.firstName ?? '').toLowerCase().includes(q) ||
         (u.lastName ?? '').toLowerCase().includes(q) ||
-        u.email.toLowerCase().includes(q)
-    );
-  }, [users, query]);
+        u.phone.toLowerCase().includes(q)
+      );
+    });
+  }, [users, query, roleF, statusF, unitId]);
+
+  const filterGroups: FilterGroup[] = [
+    {
+      id: 'role',
+      title: t('filter_group_role'),
+      options: [
+        { value: 'all', label: t('filter_opt_all'), count: users.length },
+        ...BUILDING_ROLES.map((r) => ({
+          value: r,
+          label: t(ROLE_KEY[r]),
+          count: users.filter((u) => u.role === r).length,
+        })),
+      ],
+    },
+    {
+      id: 'status',
+      title: t('filter_group_status'),
+      options: [
+        { value: 'all', label: t('filter_opt_all') },
+        ...STATUSES.map((s) => ({
+          value: s,
+          label: t(STATUS_KEY[s]),
+          count: users.filter((u) => u.status === s).length,
+        })),
+      ],
+    },
+  ];
+  const filtersActive = isFilterActive(filterGroups, filters);
+
+  // Shared action-sheet items for the tapped user — preset to THIS building.
+  const sheetItems: UserSheetItem[] = actionTarget
+    ? [
+        { key: 'edit', icon: 'edit', label: t('users_action_edit'), onPress: () => setEditTarget(actionTarget) },
+        { key: 'send', icon: 'message', label: t('users_action_send_login'), onPress: () => void sendLogin(actionTarget) },
+        { key: 'resend', icon: 'key', label: t('users_action_resend'), onPress: () => void resendCredentials(actionTarget) },
+        {
+          key: 'ba',
+          icon: 'shield',
+          label: actionTarget.isBuildingAdmin ? t('demote_building_admin') : t('promote_building_admin'),
+          tone: actionTarget.isBuildingAdmin ? 'neutral' : 'warning',
+          onPress: () => void toggleBuildingAdmin(actionTarget),
+        },
+        ...(actionTarget.status === 'active' || actionTarget.status === 'suspended'
+          ? [
+              {
+                key: 'status',
+                icon: 'power' as const,
+                label:
+                  actionTarget.status === 'active'
+                    ? t('users_action_deactivate')
+                    : t('users_action_activate'),
+                tone: (actionTarget.status === 'active' ? 'danger' : 'neutral') as 'danger' | 'neutral',
+                onPress: () => void toggleStatus(actionTarget),
+              },
+            ]
+          : []),
+      ]
+    : [];
 
   async function setUserStatus(target: AdminUser, next: 'active' | 'suspended') {
     try {
@@ -144,31 +213,114 @@ export function BuildingUsersPage() {
     } catch (e) {
       const msg = (e as { response?: { data?: { error?: { message?: string } } } })
         ?.response?.data?.error?.message;
-      Alert.alert(t('users_err_save'), msg ?? '');
+      await confirm({ title: t('users_err_save'), message: msg ?? '', confirmLabel: t('done') });
     }
   }
 
   function openActions(target: AdminUser) {
-    const buttons: Array<{ text: string; style?: 'cancel' | 'destructive'; onPress?: () => void }> = [
-      { text: t('cancel'), style: 'cancel' },
-    ];
+    setActionTarget(target);
+  }
+
+  async function toggleStatus(target: AdminUser) {
+    setActionTarget(null);
     if (target.status === 'active') {
-      buttons.unshift({
-        text: t('users_action_deactivate'),
-        style: 'destructive',
-        onPress: () => setUserStatus(target, 'suspended'),
+      const ok = await confirm({
+        title: t('users_action_deactivate'),
+        message: `${target.firstName ?? ''} ${target.lastName ?? ''}`.trim() || target.phone,
+        confirmLabel: t('users_action_deactivate'),
+        destructive: true,
       });
+      if (ok) await setUserStatus(target, 'suspended');
     } else if (target.status === 'suspended') {
-      buttons.unshift({
-        text: t('users_action_activate'),
-        onPress: () => setUserStatus(target, 'active'),
-      });
+      await setUserStatus(target, 'active');
     }
-    Alert.alert(
-      `${target.firstName ?? ''} ${target.lastName ?? ''}`.trim() || target.email,
-      `${target.email} · ${t(ROLE_KEY[target.role])}`,
-      buttons
+  }
+
+  async function sendLogin(target: AdminUser) {
+    try {
+      const r = await getUserLoginLink(target._id);
+      if (r.whatsappUrl) await Linking.openURL(r.whatsappUrl);
+    } catch (e) {
+      const msg = (e as { response?: { data?: { error?: { message?: string } } } })
+        ?.response?.data?.error?.message;
+      await confirm({ title: t('users_err_save'), message: msg ?? '', confirmLabel: t('done') });
+    }
+  }
+
+  async function resendCredentials(target: AdminUser) {
+    const ok = await confirm({
+      title: t('users_resend_confirm_title'),
+      message: t('users_resend_confirm_body'),
+      confirmLabel: t('users_resend_confirm_ok'),
+      cancelLabel: t('cancel'),
+    });
+    if (!ok) return;
+    try {
+      const r = await resetUserPassword(target._id);
+      if (r.whatsappUrl) await Linking.openURL(r.whatsappUrl);
+    } catch (e) {
+      const msg = (e as { response?: { data?: { error?: { message?: string } } } })
+        ?.response?.data?.error?.message;
+      await confirm({ title: t('users_err_save'), message: msg ?? '', confirmLabel: t('done') });
+    }
+  }
+
+  async function toggleBuildingAdmin(target: AdminUser) {
+    setActionTarget(null);
+    if (!buildingId) return;
+    const next = !target.isBuildingAdmin;
+    // Active/invited building admins right now (the ones that keep a building
+    // "managed" and therefore activatable).
+    const activeAdmins = users.filter(
+      (u) => u.isBuildingAdmin && (u.status === 'active' || u.status === 'invited'),
     );
+
+    // Removing the last building admin deactivates the whole building — warn.
+    if (!next) {
+      const isLast = activeAdmins.length === 1 && activeAdmins[0]?._id === target._id;
+      if (isLast) {
+        const ok = await confirm({
+          title: t('users_last_admin_title'),
+          message: t('users_last_admin_body'),
+          confirmLabel: t('users_last_admin_confirm'),
+          cancelLabel: t('cancel'),
+          destructive: true,
+        });
+        if (!ok) return;
+      }
+    }
+
+    try {
+      const updated = await setBuildingAdmin(buildingId, target._id, next);
+      setUsers((prev) =>
+        prev.map((u) =>
+          u._id === target._id ? { ...u, isBuildingAdmin: updated.isBuildingAdmin } : u,
+        ),
+      );
+      // Appointing the building's first admin makes it activatable — offer to
+      // activate the whole building right away (system-admin only endpoint).
+      if (next && activeAdmins.length === 0) {
+        const activate = await confirm({
+          title: t('users_activate_building_title'),
+          message: t('users_activate_building_body'),
+          confirmLabel: t('users_activate_building_confirm'),
+          cancelLabel: t('cancel'),
+        });
+        if (activate) {
+          try {
+            await api.patch(`/buildings/${buildingId}/status`, { status: 'active' });
+          } catch (e) {
+            const msg = (e as { response?: { data?: { error?: { message?: string } } } })
+              ?.response?.data?.error?.message;
+            await confirm({ title: t('buildings_err_status'), message: msg ?? '', confirmLabel: t('done') });
+          }
+        }
+      }
+    } catch (e) {
+      const msg = (e as { response?: { data?: { error?: { message?: string } } } })
+        ?.response?.data?.error?.message;
+      await confirm({ title: t('users_err_save'), message: msg ?? '', confirmLabel: t('done') });
+    }
   }
 
   if (loading) {
@@ -193,25 +345,20 @@ export function BuildingUsersPage() {
         />
       }
     >
-      <View style={styles.headerRow}>
-        <View style={{ flex: 1 }}>
-          <Text style={type.caption}>{t('nav_users').toUpperCase()}</Text>
-          <Text style={type.display}>{users.length}</Text>
-          <Text style={type.small}>{buildingName || tf('buildings_users_in', { n: '' })}</Text>
-        </View>
-        {hasBuildingAdmin ? null : (
-          <Button
-            label={t('buildings_appoint_admin')}
-            variant="primary"
-            onPress={() => setInviteOpen(true)}
-            style={{ paddingHorizontal: 16 }}
-          />
-        )}
-      </View>
-      {hasBuildingAdmin && (
-        <View style={styles.noteBox}>
-          <Text style={styles.noteText}>{t('buildings_admin_appointed_note')}</Text>
-        </View>
+      <ListToolbar
+        countLabel={`${unitNumber ? `${buildingName} · ${unitNumber}` : buildingName || t('nav_users')} · ${filtered.length}`}
+        onFilter={() => setFilterOpen(true)}
+        filterActive={filtersActive}
+        onAdd={() => setInviteOpen(true)}
+        addA11yLabel={t('create_user_title')}
+      />
+
+      {!hasBuildingAdmin && (
+        <Notice
+          tone="warning"
+          message={t('buildings_appoint_admin')}
+          style={styles.notice}
+        />
       )}
 
       {error && (
@@ -220,64 +367,109 @@ export function BuildingUsersPage() {
         </View>
       )}
 
-      <View style={styles.searchWrap}>
-        <Text style={styles.searchIcon}>🔍</Text>
-        <TextInput
-          value={query}
-          onChangeText={setQuery}
-          placeholder={t('users_search_ph')}
-          placeholderTextColor={palette.textSubtle}
-          style={styles.search}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-      </View>
+      <SearchField value={query} onChangeText={setQuery} placeholder={t('users_search_ph')} />
 
       <Card padded={false}>
         {filtered.length === 0 ? (
           <View style={{ padding: spacing.lg }}>
-            <EmptyState icon="👥" title={t('users_no_match')} body="" />
+            <EmptyState iconName="users" title={t('users_no_match')} body="" />
           </View>
         ) : (
-          filtered.map((u, i) => (
-            <View key={u._id}>
-              <TouchableOpacity activeOpacity={0.85} style={styles.row} onPress={() => openActions(u)}>
-                <Avatar name={`${u.firstName ?? ''} ${u.lastName ?? ''}`.trim() || u.email} />
-                <View style={{ flex: 1, minWidth: 0 }}>
-                  <Text style={[type.body, { fontWeight: '600' }]} numberOfLines={1}>
-                    {`${u.firstName ?? ''} ${u.lastName ?? ''}`.trim() || u.email}
-                  </Text>
-                  <Text style={type.small} numberOfLines={1}>
-                    {u.email}
-                  </Text>
-                </View>
-                <View style={{ alignItems: 'flex-start', gap: 4 }}>
-                  <Pill label={t(ROLE_KEY[u.role])} tone={roleTone[u.role]} />
-                  <Pill label={t(STATUS_KEY[u.status])} tone={statusTone[u.status]} />
-                </View>
-              </TouchableOpacity>
-              {i < filtered.length - 1 && <View style={styles.divider} />}
-            </View>
-          ))
+          filtered.map((u, i) => {
+            const name = `${u.firstName ?? ''} ${u.lastName ?? ''}`.trim();
+            const unit = u.unitId ? unitNumberById.get(u.unitId) : undefined;
+            return (
+              <View key={u._id}>
+                <TouchableOpacity activeOpacity={0.85} style={styles.row} onPress={() => openActions(u)}>
+                  <Avatar name={name || u.phone} />
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    {name ? (
+                      <>
+                        <Text style={[type.body, { fontWeight: '600' }]} numberOfLines={1}>
+                          {name}
+                        </Text>
+                        <PhoneText phone={u.phone} numberOfLines={1} style={type.small} />
+                      </>
+                    ) : (
+                      <PhoneText phone={u.phone} numberOfLines={1} style={[type.body, { fontWeight: '600' }]} />
+                    )}
+                    {unit ? (
+                      <Text style={[type.small, { color: palette.textSubtle }]} numberOfLines={1}>
+                        {tf('users_meta_unit_only', { unit })}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <View style={{ alignItems: 'flex-start', gap: 4 }}>
+                    {u.isBuildingAdmin && <Pill label={t('users_pill_building_admin')} tone="accent" />}
+                    <Pill label={t(ROLE_KEY[u.role])} tone={roleTone[u.role]} />
+                    <Pill label={t(STATUS_KEY[u.status])} tone={statusTone[u.status]} />
+                  </View>
+                </TouchableOpacity>
+                {i < filtered.length - 1 && <View style={styles.divider} />}
+              </View>
+            );
+          })
         )}
       </Card>
 
       <View style={{ height: spacing.xl }} />
 
-      <InviteModal
+      <UserActionSheet
+        open={!!actionTarget}
+        onClose={() => setActionTarget(null)}
+        title={
+          actionTarget
+            ? `${actionTarget.firstName ?? ''} ${actionTarget.lastName ?? ''}`.trim() ||
+              ltrPhone(formatPhone(actionTarget.phone))
+            : ''
+        }
+        subtitle={
+          actionTarget
+            ? `${ltrPhone(formatPhone(actionTarget.phone))} · ${t(ROLE_KEY[actionTarget.role])}`
+            : undefined
+        }
+        items={sheetItems}
+      />
+
+      <FilterSheet
+        open={filterOpen}
+        onClose={() => setFilterOpen(false)}
+        title={t('filter_title')}
+        groups={filterGroups}
+        value={filters}
+        onChange={(groupId, optionValue) =>
+          setFilters((prev) => ({ ...prev, [groupId]: optionValue }))
+        }
+        onClear={() => setFilters({})}
+        clearLabel={t('filter_clear')}
+        doneLabel={t('filter_done')}
+      />
+
+      <CreateUserModal
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
-        // Admin can only appoint the building admin (owner + flag). Role
-        // chip is locked, dependent/renter not offered.
-        defaultRole="owner"
-        lockedRole="owner"
-        allowedRoles={['owner']}
-        markBuildingAdmin
-        units={inviteUnits}
-        buildingId={buildingId}
-        onInvited={() => {
-          setInviteOpen(false);
+        // Locked to the building being viewed — role picker (owner/tenant/
+        // follower/independent) + building-admin toggle; no super-admin option.
+        building={buildingId ? { _id: buildingId, name: buildingName } : undefined}
+        // When scoped to a unit, lock the add flow to that unit too.
+        lockedUnit={unitId && unitNumber ? { _id: unitId, number: unitNumber } : undefined}
+        onCreated={() => {
           void fetch();
+        }}
+      />
+
+      <EditUserModal
+        open={!!editTarget}
+        userId={editTarget?._id ?? ''}
+        initialFirstName={editTarget?.firstName ?? ''}
+        initialLastName={editTarget?.lastName ?? ''}
+        onClose={() => setEditTarget(null)}
+        onSaved={(next) => {
+          const id = editTarget?._id;
+          setUsers((prev) =>
+            prev.map((u) => (u._id === id ? { ...u, firstName: next.firstName, lastName: next.lastName } : u)),
+          );
+          setEditTarget(null);
         }}
       />
     </ScrollView>
@@ -288,7 +480,6 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
   scroll: { padding: spacing.lg, paddingBottom: 120 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
-  headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg, gap: spacing.md },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -304,31 +495,5 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
   errorText: { color: palette.danger, fontSize: 13 },
-  noteBox: {
-    padding: spacing.md,
-    backgroundColor: palette.accentSoft,
-    borderRadius: radii.md,
-    marginBottom: spacing.md,
-  },
-  noteText: { color: palette.accent, fontSize: 13, fontWeight: '600' },
-  searchWrap: { position: 'relative', marginBottom: spacing.md },
-  searchIcon: {
-    position: 'absolute',
-    start: spacing.md,
-    top: spacing.sm + 2,
-    fontSize: 16,
-    color: palette.textSubtle,
-    zIndex: 1,
-  },
-  search: {
-    borderWidth: 1,
-    borderColor: palette.inputBorder,
-    borderRadius: radii.md,
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md + 24,
-    backgroundColor: palette.inputBg,
-    fontSize: 15,
-    color: palette.text,
-    ...textStart,
-  },
+  notice: { marginBottom: spacing.md },
 });

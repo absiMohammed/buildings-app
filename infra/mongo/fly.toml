@@ -1,0 +1,18 @@
+# Self-hosted MongoDB for the building-app backend, private to the Fly org.
+# Reachable only over the 6PN private network at building-app-mongo.internal:27017
+# (no public ingress). Root credentials come from Fly secrets:
+#   MONGO_INITDB_ROOT_USERNAME / MONGO_INITDB_ROOT_PASSWORD
+# Deploy:  fly deploy --config infra/mongo/fly.toml
+app = "building-app-mongo"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[mounts]
+  source = "mongodata"
+  destination = "/data/db"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1024mb"

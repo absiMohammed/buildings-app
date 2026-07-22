@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Alert,
+  I18nManager,
   ScrollView,
   StyleSheet,
   Switch,
@@ -9,12 +9,16 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
+import { useFocusEffect, useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import MapView, { Marker } from 'react-native-maps';
 import { api } from '../api/client';
-import { Button, Card, EmptyState, Pill, SectionHeader } from '../components/ui';
+import { Button, Card, CollapsibleCard, EmptyState, Pill } from '../components/ui';
+import { Icon, type IconName } from '../components/Icon';
 import { BuildingFormModal } from '../components/BuildingFormModal';
-import { ActionFormModal, type BuildingAction } from '../components/ActionFormModal';
+import { MapPicker, type LatLng } from '../components/MapPicker';
+import { useConfirm } from '../components/ConfirmProvider';
+import { listBuildingUnits, type Unit } from '../api/units';
 import { MODULES } from '../auth/capabilities';
 import { palette, radii, spacing, type, textStart } from '../components/theme';
 import { useI18n } from '../i18n';
@@ -64,6 +68,7 @@ export function BuildingDetailPage() {
   const route = useRoute<RouteProp<AppStackParamList, 'BuildingDetail'>>();
   const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
   const { t, tf } = useI18n();
+  const { confirm } = useConfirm();
   const buildingId = route.params?.buildingId;
 
   const [building, setBuilding] = useState<AdminBuilding | null>(null);
@@ -74,30 +79,26 @@ export function BuildingDetailPage() {
   const [latDraft, setLatDraft] = useState('');
   const [lngDraft, setLngDraft] = useState('');
   const [savingGeo, setSavingGeo] = useState(false);
+  const [mapOpen, setMapOpen] = useState(false);
+  // Units count for this building (management lives on its own screen).
+  const [units, setUnits] = useState<Unit[]>([]);
 
   // Local copy of the enabled set so the toggles feel responsive; persisted
   // on tap (one PATCH per toggle, debounced by state).
   const [enabledSet, setEnabledSet] = useState<Set<string>>(new Set());
   const [savingFeatures, setSavingFeatures] = useState(false);
 
-  // Per-building actions (gates / elevators / etc.). Each carries its own
-  // annual price that folds into the building's subscription total.
-  const [actions, setActions] = useState<BuildingAction[]>([]);
-  const [actionsError, setActionsError] = useState<string | null>(null);
-  const [actionModalOpen, setActionModalOpen] = useState(false);
-  const [editingAction, setEditingAction] = useState<BuildingAction | null>(null);
-
   const fetch = useCallback(async () => {
     setError(null);
-    setActionsError(null);
     try {
-      const [bRes, aRes] = await Promise.all([
+      const [bRes, uRes] = await Promise.all([
         api.get('/buildings'),
-        buildingId ? api.get(`/buildings/${buildingId}/actions`) : Promise.resolve({ data: { actions: [] } }),
+        buildingId ? listBuildingUnits(buildingId).catch(() => [] as Unit[]) : Promise.resolve([] as Unit[]),
       ]);
       const all = (bRes.data?.buildings ?? []) as AdminBuilding[];
       const b = all.find((x) => x._id === buildingId) ?? null;
       setBuilding(b);
+      setUnits(uRes as Unit[]);
       setLatDraft(b?.settings?.geoCenter?.lat == null ? '' : String(b.settings.geoCenter.lat));
       setLngDraft(b?.settings?.geoCenter?.lng == null ? '' : String(b.settings.geoCenter.lng));
       // Hydrate the toggle set. `null` from server = no restriction; mirror
@@ -107,7 +108,6 @@ export function BuildingDetailPage() {
           ? TOGGLEABLE_FEATURES.map((f) => f.id)
           : b.enabledModules;
       setEnabledSet(new Set(list));
-      setActions((aRes.data?.actions ?? []) as BuildingAction[]);
     } catch (e) {
       const msg = (e as { response?: { data?: { error?: { message?: string } } } })
         ?.response?.data?.error?.message;
@@ -117,9 +117,18 @@ export function BuildingDetailPage() {
     }
   }, [buildingId, t]);
 
+  // Refetch on focus so status changes made on inner screens (e.g. activating
+  // the building right after appointing its admin) show up on return.
+  useFocusEffect(
+    useCallback(() => {
+      void fetch();
+    }, [fetch]),
+  );
+
+  // Show the building's own name in the nav bar (not the generic "Buildings").
   useEffect(() => {
-    void fetch();
-  }, [fetch]);
+    if (building) navigation.setOptions({ title: building.name });
+  }, [building, navigation]);
 
   const geoDirty = useMemo(() => {
     const lat = building?.settings?.geoCenter?.lat;
@@ -129,6 +138,14 @@ export function BuildingDetailPage() {
       lngDraft.trim() !== (lng == null ? '' : String(lng))
     );
   }, [latDraft, lngDraft, building]);
+
+  // Current draft coordinates as a LatLng, or null when either is not a
+  // finite number. Drives both the read-only preview and the map picker seed.
+  const geoPreview = useMemo<LatLng | null>(() => {
+    const lat = parseFloat(latDraft);
+    const lng = parseFloat(lngDraft);
+    return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+  }, [latDraft, lngDraft]);
 
   const featuresDirty = useMemo(() => {
     if (!building) return false;
@@ -151,11 +168,11 @@ export function BuildingDetailPage() {
     const lat = latDraft.trim() === '' ? null : parseFloat(latDraft);
     const lng = lngDraft.trim() === '' ? null : parseFloat(lngDraft);
     if (lat != null && (!Number.isFinite(lat) || lat < -90 || lat > 90)) {
-      Alert.alert(t('settings_error_geo_lat_invalid'));
+      await confirm({ title: t('settings_error_geo_lat_invalid'), confirmLabel: t('continue') });
       return;
     }
     if (lng != null && (!Number.isFinite(lng) || lng < -180 || lng > 180)) {
-      Alert.alert(t('settings_error_geo_lng_invalid'));
+      await confirm({ title: t('settings_error_geo_lng_invalid'), confirmLabel: t('continue') });
       return;
     }
     setSavingGeo(true);
@@ -164,7 +181,7 @@ export function BuildingDetailPage() {
     } catch (e) {
       const msg = (e as { response?: { data?: { error?: { message?: string } } } })
         ?.response?.data?.error?.message;
-      Alert.alert(t('buildings_err_save'), msg ?? '');
+      await confirm({ title: t('buildings_err_save'), message: msg ?? t('buildings_err_save'), confirmLabel: t('continue') });
     } finally {
       setSavingGeo(false);
     }
@@ -177,7 +194,7 @@ export function BuildingDetailPage() {
     } catch (e) {
       const msg = (e as { response?: { data?: { error?: { message?: string } } } })
         ?.response?.data?.error?.message;
-      Alert.alert(t('buildings_err_save'), msg ?? '');
+      await confirm({ title: t('buildings_err_save'), message: msg ?? t('buildings_err_save'), confirmLabel: t('continue') });
     } finally {
       setSavingFeatures(false);
     }
@@ -195,35 +212,55 @@ export function BuildingDetailPage() {
   async function toggleStatus() {
     if (!building) return;
     const next = building.status === 'active' ? 'inactive' : 'active';
+    // Deactivation is destructive (residents lose access) — confirm first.
+    if (next === 'inactive') {
+      const ok = await confirm({
+        title: t('buildings_action_deactivate'),
+        confirmLabel: t('buildings_action_deactivate'),
+        cancelLabel: t('cancel'),
+        destructive: true,
+      });
+      if (!ok) return;
+    }
     try {
       const r = await api.patch(`/buildings/${building._id}/status`, { status: next });
+      // Refresh local state so the pill + control reflect the new status.
       setBuilding(r.data.building as AdminBuilding);
     } catch (e) {
-      const msg = (e as { response?: { data?: { error?: { message?: string } } } })
-        ?.response?.data?.error?.message;
-      Alert.alert(t('buildings_err_status'), msg ?? '');
+      // The backend rejects activation with 400 (code BUILDING_NEEDS_ADMIN)
+      // when no building admin exists — localize that case; otherwise surface
+      // the server message (then a generic fallback).
+      const err = (e as { response?: { data?: { error?: { code?: string; message?: string } } } })
+        ?.response?.data?.error;
+      const needsAdmin = err?.code === 'BUILDING_NEEDS_ADMIN';
+      await confirm({
+        title: needsAdmin ? t('buildings_activate_needs_admin_title') : t('buildings_err_status'),
+        message: needsAdmin
+          ? t('buildings_activate_needs_admin')
+          : err?.message ?? t('buildings_err_status'),
+        confirmLabel: t('continue'),
+      });
     }
   }
 
-  function confirmDelete() {
+  async function confirmDelete() {
     if (!building) return;
-    Alert.alert(tf('buildings_delete_title', { name: building.name }), t('buildings_delete_body'), [
-      { text: t('cancel'), style: 'cancel' },
-      {
-        text: t('remove'),
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await api.delete(`/buildings/${building._id}`);
-            navigation.goBack();
-          } catch (e) {
-            const msg = (e as { response?: { data?: { error?: { message?: string } } } })
-              ?.response?.data?.error?.message;
-            Alert.alert(t('buildings_err_delete'), msg ?? '');
-          }
-        },
-      },
-    ]);
+    const ok = await confirm({
+      title: tf('buildings_delete_title', { name: building.name }),
+      message: t('buildings_delete_body'),
+      confirmLabel: t('remove'),
+      cancelLabel: t('cancel'),
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await api.delete(`/buildings/${building._id}`);
+      navigation.goBack();
+    } catch (e) {
+      const msg = (e as { response?: { data?: { error?: { message?: string } } } })
+        ?.response?.data?.error?.message;
+      await confirm({ title: t('buildings_err_delete'), message: msg ?? t('buildings_err_delete'), confirmLabel: t('continue') });
+    }
   }
 
   if (loading) {
@@ -250,35 +287,72 @@ export function BuildingDetailPage() {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
       <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={type.caption}>{t('buildings_title').toUpperCase()}</Text>
-          <Text style={type.display}>{building.name}</Text>
-          {building.address ? <Text style={type.small}>{building.address}</Text> : null}
-        </View>
-        <View style={{ alignItems: 'flex-start', gap: 6 }}>
-          <Pill
-            label={t(building.status === 'active' ? 'buildings_status_active' : 'buildings_status_inactive')}
-            tone={building.status === 'active' ? 'positive' : 'warning'}
-          />
-          <TouchableOpacity onPress={toggleStatus} hitSlop={8}>
-            <Text style={styles.linkText}>
-              {building.status === 'active' ? t('buildings_action_deactivate') : t('buildings_action_activate')}
-            </Text>
-          </TouchableOpacity>
-        </View>
+        <Pill
+          label={t(building.status === 'active' ? 'buildings_status_active' : 'buildings_status_inactive')}
+          tone={building.status === 'active' ? 'positive' : 'warning'}
+        />
+        {building.address || building.currency ? (
+          <Text style={[type.small, { flex: 1 }]} numberOfLines={1}>
+            {[building.address, building.currency].filter(Boolean).join(' · ')}
+          </Text>
+        ) : null}
       </View>
 
-      <View style={styles.ctaRow}>
-        <Button
+      <View style={styles.actionBar}>
+        <IconAction
+          icon="power"
+          label={building.status === 'active' ? t('buildings_action_deactivate') : t('buildings_action_activate')}
+          tone={building.status === 'active' ? 'danger' : 'positive'}
+          onPress={toggleStatus}
+        />
+        <IconAction icon="edit" label={t('buildings_edit_title')} onPress={() => setEditOpen(true)} />
+        <IconAction
+          icon="users"
           label={t('buildings_action_users')}
           onPress={() => navigation.navigate('BuildingUsers', { buildingId: building._id, buildingName: building.name })}
-          style={{ flex: 1 }}
         />
-        <Button label={t('buildings_edit_title')} variant="secondary" onPress={() => setEditOpen(true)} style={{ flex: 1 }} />
+        <IconAction
+          icon="trash"
+          label={t('buildings_action_delete')}
+          tone="danger"
+          onPress={() => void confirmDelete()}
+        />
       </View>
 
-      <SectionHeader title={t('settings_section_geo_center')} />
-      <Card>
+      {/* Units — dedicated screen */}
+      <Card padded={false}>
+        <NavRow
+          icon="units"
+          title={t('buildings_units_title')}
+          subtitle={tf('buildings_units_count', { n: units.length })}
+          onPress={() =>
+            navigation.navigate('BuildingUnits', {
+              buildingId: building._id,
+              buildingName: building.name,
+            })
+          }
+        />
+      </Card>
+
+      {/* Actions (gates / doors / elevators) — dedicated screen */}
+      <Card padded={false}>
+        <NavRow
+          icon="gate"
+          title={t('actions_section_title')}
+          subtitle={t('actions_section_hint')}
+          onPress={() =>
+            navigation.navigate('BuildingActions', {
+              buildingId: building._id,
+              buildingName: building.name,
+              currency: building.currency,
+            })
+          }
+        />
+      </Card>
+
+      {/* Location — title is the card header; tap to collapse */}
+      <CollapsibleCard title={t('settings_section_geo_center')}>
+      <View style={styles.collapseBody}>
         <Text style={styles.fieldLabel}>{t('settings_geo_center_hint')}</Text>
         <View style={styles.geoRow}>
           <View style={{ flex: 1 }}>
@@ -304,6 +378,34 @@ export function BuildingDetailPage() {
             />
           </View>
         </View>
+        <Text style={[styles.fieldLabel, { marginTop: spacing.md }]}>{t('building_location')}</Text>
+        {geoPreview ? (
+          <View style={styles.mapPreview}>
+            <MapView
+              style={{ flex: 1 }}
+              pointerEvents="none"
+              scrollEnabled={false}
+              zoomEnabled={false}
+              rotateEnabled={false}
+              region={{
+                latitude: geoPreview.lat,
+                longitude: geoPreview.lng,
+                latitudeDelta: 0.01,
+                longitudeDelta: 0.01,
+              }}
+            >
+              <Marker coordinate={{ latitude: geoPreview.lat, longitude: geoPreview.lng }} />
+            </MapView>
+          </View>
+        ) : null}
+        <View style={{ alignItems: 'flex-start', marginTop: spacing.md }}>
+          <Button
+            label={t('building_set_location')}
+            variant="secondary"
+            onPress={() => setMapOpen(true)}
+            style={{ paddingHorizontal: 16 }}
+          />
+        </View>
         <View style={{ alignItems: 'flex-start', marginTop: spacing.md }}>
           <Button
             label={savingGeo ? t('saving') : t('save')}
@@ -313,10 +415,11 @@ export function BuildingDetailPage() {
             style={{ paddingHorizontal: 16 }}
           />
         </View>
-      </Card>
+      </View>
+      </CollapsibleCard>
 
-      <SectionHeader title={t('buildings_features_title')} />
-      <Card padded={false}>
+      {/* Features / benefits — title is the card header; tap to collapse */}
+      <CollapsibleCard title={t('buildings_features_title')}>
         <Text style={[type.small, { padding: spacing.md, paddingBottom: 0 }]}>
           {t('buildings_features_hint')}
         </Text>
@@ -344,69 +447,9 @@ export function BuildingDetailPage() {
             style={{ paddingHorizontal: 16 }}
           />
         </View>
-      </Card>
-
-      <SectionHeader title={t('actions_section_title')} />
-      <Card padded={false}>
-        <Text style={[type.small, { padding: spacing.md, paddingBottom: 0 }]}>
-          {t('actions_section_hint')}
-        </Text>
-        {actions.length === 0 ? (
-          <View style={{ padding: spacing.md }}>
-            <Text style={type.small}>{t('actions_empty')}</Text>
-          </View>
-        ) : (
-          actions.map((a, i) => (
-            <TouchableOpacity
-              key={a._id}
-              activeOpacity={0.85}
-              onPress={() => {
-                setEditingAction(a);
-                setActionModalOpen(true);
-              }}
-              style={[styles.actionRow, i < actions.length - 1 && styles.actionDivider]}
-            >
-              <View style={{ flex: 1, minWidth: 0 }}>
-                <Text style={[type.body, { fontWeight: '600' }]} numberOfLines={1}>
-                  {a.name}
-                </Text>
-                <Text style={type.small} numberOfLines={1}>
-                  {t(`action_type_${a.type}` as const)}
-                  {a.annualPrice > 0 ? ` · ${building.currency} ${a.annualPrice}` : ''}
-                </Text>
-              </View>
-              <Pill
-                label={t(a.status === 'active' ? 'action_status_active' : 'action_status_inactive')}
-                tone={a.status === 'active' ? 'positive' : 'warning'}
-              />
-            </TouchableOpacity>
-          ))
-        )}
-        <View style={{ padding: spacing.md, alignItems: 'flex-start' }}>
-          <Button
-            label={t('actions_new')}
-            variant="primary"
-            onPress={() => {
-              setEditingAction(null);
-              setActionModalOpen(true);
-            }}
-          />
-        </View>
-        {actionsError && (
-          <Text style={[type.small, { color: palette.danger, paddingHorizontal: spacing.md, paddingBottom: spacing.md }]}>
-            {actionsError}
-          </Text>
-        )}
-      </Card>
-
-      <SectionHeader title={t('settings_section_about')} />
-      <Card>
-        <RowDetail label={t('settings_about_currency')} value={building.currency} />
-        <RowDetail label={t('settings_about_timezone')} value={building.settings?.timezone ?? '—'} />
-      </Card>
+      </CollapsibleCard>
 
       <View style={{ height: spacing.xl }} />
-      <Button label={t('buildings_delete_title_btn')} variant="danger" onPress={confirmDelete} />
 
       <BuildingFormModal
         open={editOpen}
@@ -418,34 +461,65 @@ export function BuildingDetailPage() {
         }}
       />
 
-      <ActionFormModal
-        open={actionModalOpen}
-        onClose={() => setActionModalOpen(false)}
-        buildingId={building._id}
-        initial={editingAction}
-        onSaved={(saved) =>
-          setActions((prev) => {
-            const idx = prev.findIndex((x) => x._id === saved._id);
-            if (idx === -1) return [saved, ...prev];
-            const next = prev.slice();
-            next[idx] = saved;
-            return next;
-          })
-        }
-        onDeleted={(id) => setActions((prev) => prev.filter((x) => x._id !== id))}
+      <MapPicker
+        visible={mapOpen}
+        initial={geoPreview}
+        onPick={(coords) => {
+          setLatDraft(String(coords.lat));
+          setLngDraft(String(coords.lng));
+          setMapOpen(false);
+        }}
+        onClose={() => setMapOpen(false)}
       />
     </ScrollView>
   );
 }
 
-function RowDetail({ label, value }: { label: string; value: string }) {
+function NavRow({
+  icon,
+  title,
+  subtitle,
+  onPress,
+}: {
+  icon: IconName;
+  title: string;
+  subtitle: string;
+  onPress: () => void;
+}) {
   return (
-    <View style={styles.detailRow}>
-      <Text style={type.small}>{label}</Text>
-      <Text style={[type.body, { fontWeight: '600' }]} numberOfLines={1}>
-        {value}
-      </Text>
-    </View>
+    <TouchableOpacity style={styles.navRow} activeOpacity={0.85} onPress={onPress}>
+      <View style={[styles.navRowIcon, { backgroundColor: palette.accentSoft }]}>
+        <Icon name={icon} size={20} color={palette.accent} />
+      </View>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={[type.body, { fontWeight: '600' }]}>{title}</Text>
+        <Text style={type.small} numberOfLines={1}>{subtitle}</Text>
+      </View>
+      <Icon name={I18nManager.isRTL ? 'chevronLeft' : 'chevronRight'} size={20} color={palette.textSubtle} />
+    </TouchableOpacity>
+  );
+}
+
+function IconAction({
+  icon,
+  label,
+  onPress,
+  tone = 'accent',
+}: {
+  icon: IconName;
+  label: string;
+  onPress: () => void;
+  tone?: 'accent' | 'positive' | 'danger';
+}) {
+  const color = tone === 'danger' ? palette.danger : tone === 'positive' ? palette.success : palette.accent;
+  const bg = tone === 'danger' ? palette.dangerSoft : tone === 'positive' ? palette.successSoft : palette.accentSoft;
+  return (
+    <TouchableOpacity style={styles.iconAction} activeOpacity={0.8} onPress={onPress}>
+      <View style={[styles.iconActionCircle, { backgroundColor: bg }]}>
+        <Icon name={icon} size={22} color={color} />
+      </View>
+      <Text style={styles.iconActionLabel} numberOfLines={1}>{label}</Text>
+    </TouchableOpacity>
   );
 }
 
@@ -453,10 +527,29 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
   scroll: { padding: spacing.lg, paddingBottom: 120 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
-  header: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.md, marginBottom: spacing.lg },
-  ctaRow: { flexDirection: 'row', gap: spacing.md, marginBottom: spacing.md },
+  header: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.md },
+  actionBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  iconAction: { alignItems: 'center', gap: 6, flex: 1 },
+  iconActionCircle: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center' },
+  iconActionLabel: { ...type.small, color: palette.textMuted, fontWeight: '600' },
+  navRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+  },
+  navRowIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  collapseBody: { padding: spacing.lg },
   fieldLabel: { ...type.small, color: palette.textMuted, marginBottom: 6 },
   geoRow: { flexDirection: 'row', gap: spacing.sm },
+  mapPreview: { height: 140, borderRadius: radii.md, overflow: 'hidden', marginTop: spacing.sm },
   input: {
     borderWidth: 1,
     borderColor: palette.inputBorder,
@@ -468,21 +561,6 @@ const styles = StyleSheet.create({
     backgroundColor: palette.inputBg,
     ...textStart,
   },
-  detailRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: spacing.sm,
-  },
-  linkText: { color: palette.accent, fontSize: 12, fontWeight: '600' },
-  actionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-  },
-  actionDivider: { borderBottomWidth: 1, borderBottomColor: palette.divider },
   featureRow: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -8,7 +8,7 @@ import { InviteToken } from '../models/InviteToken.js';
 import { Unit } from '../models/Unit.js';
 import { User } from '../models/User.js';
 import { type AuthedRequest } from '../middleware/auth.js';
-import { Forbidden, BadRequest, Conflict } from '../utils/errors.js';
+import { Forbidden, BadRequest } from '../utils/errors.js';
 import type { Role } from '../../../shared/types.js';
 
 export const router = Router();
@@ -19,8 +19,7 @@ export const router = Router();
 // while waiting for the user to redeem the link.
 async function unitOccupants(unitId: Types.ObjectId, role: Role): Promise<number> {
   return User.countDocuments({
-    unitId,
-    role,
+    memberships: { $elemMatch: { unitIds: unitId, role } },
     status: { $in: ['active', 'invited'] },
   });
 }
@@ -33,18 +32,28 @@ router.post(
     const {
       email,
       phone,
+      firstName,
+      lastName,
       role,
-      unitId,
+      unitId: unitIdSingle,
+      unitIds: unitIdsBody,
       buildingId: bodyBuildingId,
       isBuildingAdmin: bodyIsBuildingAdmin,
     } = req.body as {
       email?: string;
       phone?: string;
+      firstName?: string;
+      lastName?: string;
       role: Exclude<Role, 'admin'>;
       unitId?: string | null;
+      unitIds?: string[];
       buildingId?: string;
       isBuildingAdmin?: boolean;
     };
+    // One membership may cover several units; occupancy/owner guards below use
+    // the primary (first) unit, and all units are persisted on the membership.
+    const unitIdList = unitIdsBody && unitIdsBody.length ? unitIdsBody : unitIdSingle ? [unitIdSingle] : [];
+    const unitId = unitIdList[0] ?? null;
 
     // Rule 1: admin role is never assigned via invite; only promotion of an
     // existing owner (PATCH /users/:id/role) can produce a new admin. The
@@ -53,13 +62,13 @@ router.post(
       throw Forbidden('Admin role is granted by promotion, not by invite.');
     }
 
-    // The system admin appoints the building admin BEFORE any units exist,
-    // so unitId is optional in that one specific path. Every other invite
-    // (owner/renter/dependent placed by the building admin or a renter)
-    // still requires a unit because residents always live somewhere.
+    // A unit is optional in two cases: (a) 'independent' staff (guard/cleaner)
+    // never belong to an apartment, and (b) the system admin appointing the
+    // building admin BEFORE any units exist. Every other invite needs a unit.
     const adminAppointingBuildingAdmin =
       me.role === 'admin' && role === 'owner' && !!bodyIsBuildingAdmin;
-    if (!unitId && !adminAppointingBuildingAdmin) {
+    const unitOptional = role === 'independent' || adminAppointingBuildingAdmin;
+    if (!unitId && !unitOptional) {
       throw BadRequest('unitId is required');
     }
     const unit = unitId ? await Unit.findById(unitId) : null;
@@ -83,24 +92,11 @@ router.post(
       targetBuildingId = new Types.ObjectId(me.buildingId);
     }
 
-    // Inviter access control — admin can only ever create the building's
-    // admin owner (one per building). All subsequent residents are invited
-    // by the building admin themselves.
+    // Inviter access control. The system admin can create ANY building role
+    // in the target building (owner/renter/dependent/independent) and may flag
+    // the membership as a building admin; a building may have several admins.
     if (me.role === 'admin') {
-      if (role !== 'owner') {
-        throw Forbidden('System admin may only invite the building admin (owner role).');
-      }
-      if (!bodyIsBuildingAdmin) {
-        throw Forbidden('System admin invites must mark isBuildingAdmin = true.');
-      }
-      const existingAdmin = await User.countDocuments({
-        buildingId: targetBuildingId,
-        isBuildingAdmin: true,
-        status: { $in: ['active', 'invited'] },
-      });
-      if (existingAdmin > 0) {
-        throw Conflict('This building already has a building admin.');
-      }
+      // No role restriction — unit/occupancy rules below still apply.
     } else if (me.role === 'owner') {
       // Owner invites always have a unit (route guard above), but TS can't
       // narrow through the conditional so we re-assert here.
@@ -117,15 +113,8 @@ router.post(
       throw Forbidden('You cannot invite users.');
     }
 
-    // Rule 2 & 3: at most one owner and at most one renter per unit. Pending
-    // invites count toward the slot so a unit can't be double-booked. Skipped
-    // when no unit is attached (admin's first building-admin appointment).
-    if (unitObjectId && (role === 'owner' || role === 'renter')) {
-      const existing = await unitOccupants(unitObjectId, role);
-      if (existing > 0) {
-        throw Conflict(`This unit already has ${role === 'owner' ? 'an owner' : 'a renter'}.`);
-      }
-    }
+    // Owner/tenant per-unit uniqueness is enforced centrally in createInvite
+    // (it checks every requested unit, not just the primary one).
 
     // Rule 4-7: dependent policy. Always unit-scoped — dependents must live
     // in a specific unit, so admin's no-unit path never reaches here (admin
@@ -139,8 +128,7 @@ router.post(
         // or to the owner so the invite still has a sensible parent ref.
         if (hasRenter) {
           const renter = await User.findOne({
-            unitId: unitObjectId,
-            role: 'renter',
+            memberships: { $elemMatch: { unitIds: unitObjectId, role: 'renter' } },
             status: { $in: ['active', 'invited'] },
           });
           linkedOwnerId = (renter?._id as Types.ObjectId | undefined) ?? null;
@@ -162,17 +150,18 @@ router.post(
       }
     }
 
-    // Defense in depth: only an admin caller can set this flag. The role
-    // guard above already prevents non-admins from reaching the admin branch
-    // (only admins both invite owners *and* mark them as building admin).
-    const isBuildingAdmin = me.role === 'admin' && role === 'owner' && !!bodyIsBuildingAdmin;
+    // Only the system admin may set the building-admin flag, and it can apply
+    // to any building-scoped role (owner/renter/dependent), not owners alone.
+    const isBuildingAdmin = me.role === 'admin' && !!bodyIsBuildingAdmin;
 
     const result = await createInvite({
       email,
       phone,
+      firstName,
+      lastName,
       role,
       buildingId: targetBuildingId,
-      unitId: unitObjectId,
+      unitIds: unitIdList,
       linkedOwnerId,
       invitedBy: new Types.ObjectId(me.sub),
       isBuildingAdmin,
@@ -192,9 +181,7 @@ async function enforceDependentQuota(
   // grant dependents to non-admin users.
   const allowed = typeof cap === 'number' ? cap : 0;
   const existing = await User.countDocuments({
-    unitId,
-    role: 'dependent',
-    linkedOwnerId: inviter._id,
+    memberships: { $elemMatch: { unitIds: unitId, role: 'dependent', linkedOwnerId: inviter._id } },
     status: { $in: ['active', 'invited'] },
   });
   if (existing >= allowed) {

@@ -4,10 +4,15 @@ import type { Role } from '../../../shared/types.js';
 
 export interface AccessTokenPayload {
   sub: string;
+  // The ACTIVE membership's role, or 'admin' for the system super-admin.
   role: Role;
-  // null for system admin (no home building); always non-null for any other role.
+  // The active membership's building. null only for the system admin.
   buildingId: string | null;
+  // First unit of the active membership (compat convenience; a membership may
+  // cover several units — see the /me payload's `units`). null when none.
   unitId: string | null;
+  // Whether the active membership is a building admin.
+  isBuildingAdmin?: boolean;
   /** Issued-at timestamp in seconds, set by jsonwebtoken on sign. */
   iat?: number;
 }
@@ -30,9 +35,11 @@ export function signRefreshToken(payload: RefreshTokenPayload): string {
 }
 
 export function verifyAccessToken(token: string): AccessTokenPayload {
-  return jwt.verify(token, env.JWT_ACCESS_SECRET) as AccessTokenPayload;
+  // Pin the algorithm so a token forged with `alg: none` (or any other
+  // scheme) is rejected rather than trusted.
+  return jwt.verify(token, env.JWT_ACCESS_SECRET, { algorithms: ['HS256'] }) as AccessTokenPayload;
 }
 
 export function verifyRefreshToken(token: string): RefreshTokenPayload {
-  return jwt.verify(token, env.JWT_REFRESH_SECRET) as RefreshTokenPayload;
+  return jwt.verify(token, env.JWT_REFRESH_SECRET, { algorithms: ['HS256'] }) as RefreshTokenPayload;
 }

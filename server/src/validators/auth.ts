@@ -27,10 +27,14 @@ export const inviteSchema = z
   .object({
     email: z.string().email().optional(),
     phone: z.string().min(4).max(40).optional(),
+    firstName: z.string().min(1).max(80).optional(),
+    lastName: z.string().max(80).optional(),
     // `admin` is intentionally excluded: admin role is only reachable by
     // promoting an existing owner (PATCH /users/:id/role), never via invite.
-    role: z.enum(['owner', 'renter', 'dependent']),
+    role: z.enum(['owner', 'renter', 'dependent', 'independent']),
     unitId: z.string().optional().nullable(),
+    // Multiple units in the same building for one membership.
+    unitIds: z.array(z.string()).optional(),
     // System admin invites users into a specific building, since they
     // have no home building of their own. Required when the caller is admin;
     // ignored for any other role (the route picks `me.buildingId` instead).

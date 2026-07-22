@@ -3,6 +3,7 @@ import { Unit } from '../models/Unit.js';
 import { Payment } from '../models/Payment.js';
 import { Notification } from '../models/Notification.js';
 import { User } from '../models/User.js';
+import { sendWhatsApp } from './whatsapp.service.js';
 
 export async function generateMonthlyDues(buildingId: string) {
   const building = await Building.findById(buildingId);
@@ -45,15 +46,19 @@ export async function generateMonthlyDues(buildingId: string) {
     // Notify occupants
     if (unit.occupants && unit.occupants.length > 0) {
       const occupants = await User.find({ _id: { $in: unit.occupants }, status: 'active' });
+      const title = `Monthly dues for ${month + 1}/${year}`;
+      const body = `Amount due: ${building.currency} ${amount.toFixed(2)} by ${dueDate.toDateString()}`;
       for (const u of occupants) {
         await Notification.create({
           userId: u._id,
           buildingId,
           type: 'payment_due',
-          title: `Monthly dues for ${month + 1}/${year}`,
-          body: `Amount due: ${building.currency} ${amount.toFixed(2)} by ${dueDate.toDateString()}`,
+          title,
+          body,
           link: `/payments`,
         });
+        // Mirror the reminder over WhatsApp (no-ops if WhatsApp isn't configured).
+        await sendWhatsApp(u.phone, `${building.name}: ${title}. ${body}`);
       }
     }
   }

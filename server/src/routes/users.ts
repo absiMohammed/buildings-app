@@ -3,18 +3,164 @@ import { z } from 'zod';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { validate } from '../middleware/validate.js';
 import { requireBuildingAdmin, requireSystemAdmin, type AuthedRequest } from '../middleware/auth.js';
-import { User, GEO_FENCE_ACTIONS } from '../models/User.js';
-import { NotFound, BadRequest, Conflict } from '../utils/errors.js';
+import {
+  User,
+  GEO_FENCE_ACTIONS,
+  membershipFor,
+  membershipsForBuilding,
+  primaryMembership,
+  type UserDoc,
+} from '../models/User.js';
+import { Building } from '../models/Building.js';
+import { NotFound, BadRequest, Conflict, Forbidden } from '../utils/errors.js';
+import {
+  createSystemAdmin,
+  updateUserByAdmin,
+  resetUserCredentials,
+  loginShareLink,
+} from '../services/auth.service.js';
 
 export const router = Router();
+
+// System-admin-only: create another super-admin (application manager). No
+// building/unit — returns a generated initial password to share.
+const createAdminSchema = z
+  .object({
+    email: z.string().email().optional(),
+    phone: z.string().min(4).max(40).optional(),
+    firstName: z.string().max(80).optional(),
+    lastName: z.string().max(80).optional(),
+  })
+  .refine((d) => Boolean(d.email || d.phone), { message: 'email or phone is required', path: ['phone'] });
+
+router.post(
+  '/system-admin',
+  requireSystemAdmin,
+  validate(createAdminSchema),
+  asyncHandler(async (req, res) => {
+    const body = req.body as z.infer<typeof createAdminSchema>;
+    const result = await createSystemAdmin(body);
+    res.status(201).json(result);
+  })
+);
+
+// Flatten a user to a roster row for ONE building — surfacing that building's
+// membership (role / units / admin flag) as top-level fields the client reads.
+export function rosterRow(u: UserDoc, buildingId: string) {
+  const ms = membershipsForBuilding(u, buildingId);
+  const primary = primaryMembership(u, buildingId);
+  // A user may hold several roles across this building's units; the roster row
+  // shows the primary role, the union of their units, and per-unit roles.
+  const unitIds = [...new Set(ms.flatMap((m) => m.unitIds.map((x) => String(x))))];
+  return {
+    _id: String(u._id),
+    phone: u.phone,
+    email: u.email ?? null,
+    firstName: u.firstName,
+    lastName: u.lastName,
+    status: u.status,
+    role: primary?.role ?? 'independent',
+    unitId: unitIds[0] ?? null,
+    unitIds,
+    // Per-role breakdown for this building (e.g. owner:[1A], renter:[2B]).
+    roles: ms.map((m) => ({ role: m.role, unitIds: m.unitIds.map((x) => String(x)) })),
+    isBuildingAdmin: ms.some((m) => m.isBuildingAdmin),
+    createdAt: u.get('createdAt'),
+    updatedAt: u.get('updatedAt'),
+  };
+}
 
 router.get(
   '/',
   requireBuildingAdmin,
   asyncHandler(async (req, res) => {
     const me = (req as AuthedRequest).user;
-    const users = await User.find({ buildingId: me.buildingId }).sort({ createdAt: -1 });
-    res.json({ users: users.map((u) => u.toJSON()) });
+    const buildingId = me.buildingId as string;
+    const users = await User.find({ 'memberships.buildingId': buildingId }).sort({ createdAt: -1 });
+    res.json({ users: users.map((u) => rosterRow(u, buildingId)) });
+  })
+);
+
+// Edit a user. The system admin can change name, login phone, and the full set
+// of building/unit/role memberships (same power as creation). A building admin
+// may edit the display name only, and only for a user in their own building.
+const profileSchema = z.object({
+  firstName: z.string().trim().min(1).max(80).optional(),
+  lastName: z.string().trim().max(80).optional(),
+  phone: z.string().trim().min(4).max(40).optional(),
+  memberships: z
+    .array(
+      z.object({
+        buildingId: z.string(),
+        role: z.enum(['owner', 'renter', 'dependent', 'independent']),
+        unitIds: z.array(z.string()).optional(),
+        isBuildingAdmin: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+});
+
+router.patch(
+  '/:id',
+  validate(profileSchema),
+  asyncHandler(async (req, res) => {
+    const me = (req as AuthedRequest).user;
+    const body = req.body as z.infer<typeof profileSchema>;
+
+    // System admin: full edit (name + phone + memberships) on any user.
+    if (me.role === 'admin') {
+      const user = await updateUserByAdmin(req.params.id ?? '', body);
+      res.json({ user: user.toJSON() });
+      return;
+    }
+
+    // Building admin: display name only, for a user in their own building.
+    if (me.isBuildingAdmin && me.buildingId) {
+      const target = await User.findById(req.params.id);
+      if (!target) throw NotFound('User not found');
+      if (target.systemRole === 'admin') throw Forbidden('Not allowed');
+      if (!membershipFor(target, me.buildingId)) throw Forbidden('Building admin required');
+      if (body.firstName !== undefined) target.firstName = body.firstName;
+      if (body.lastName !== undefined) target.lastName = body.lastName;
+      await target.save();
+      res.json({ user: rosterRow(target, me.buildingId) });
+      return;
+    }
+
+    throw Forbidden('Not allowed');
+  })
+);
+
+// Guard: system admin (any user) or building admin (own building, not the
+// super-admin). Returns the target for reuse.
+async function assertCanManage(req: AuthedRequest) {
+  const me = req.user;
+  const target = await User.findById(req.params.id);
+  if (!target) throw NotFound('User not found');
+  if (me.role === 'admin') return target;
+  if (me.isBuildingAdmin && me.buildingId) {
+    if (target.systemRole === 'admin') throw Forbidden('Not allowed');
+    if (!membershipFor(target, me.buildingId)) throw Forbidden('Building admin required');
+    return target;
+  }
+  throw Forbidden('Not allowed');
+}
+
+// Reset a user's password and return a wa.me link to re-share the new login.
+router.patch(
+  '/:id/reset-password',
+  asyncHandler(async (req, res) => {
+    await assertCanManage(req as AuthedRequest);
+    res.json(await resetUserCredentials(req.params.id ?? ''));
+  })
+);
+
+// Get a wa.me link to (re)send the user's login info (no password reset).
+router.get(
+  '/:id/whatsapp-link',
+  asyncHandler(async (req, res) => {
+    await assertCanManage(req as AuthedRequest);
+    res.json(await loginShareLink(req.params.id ?? ''));
   })
 );
 
@@ -22,24 +168,50 @@ const statusSchema = z.object({ status: z.enum(['active', 'suspended']) });
 
 router.patch(
   '/:id/status',
-  requireBuildingAdmin,
   validate(statusSchema),
   asyncHandler(async (req, res) => {
     const me = (req as AuthedRequest).user;
     const nextStatus = (req.body as { status: 'active' | 'suspended' }).status;
-    // On suspension, kill the refresh token and bump sessionsRevokedAt so
-    // any access tokens already in flight are rejected on next request.
-    const suspensionUpdates =
-      nextStatus === 'suspended'
-        ? { refreshTokenHash: null, sessionsRevokedAt: new Date() }
-        : {};
-    const user = await User.findOneAndUpdate(
-      { _id: req.params.id, buildingId: me.buildingId },
-      { status: nextStatus, ...suspensionUpdates },
-      { new: true }
-    );
+    const user = await User.findById(req.params.id);
     if (!user) throw NotFound('User not found');
-    res.json({ user: user.toJSON() });
+
+    // System admin acts on any user; a building admin only on users in their
+    // own building (never the system admin).
+    if (me.role === 'admin') {
+      // allowed
+    } else if (me.isBuildingAdmin && me.buildingId) {
+      if (user.systemRole === 'admin') throw Forbidden('Not allowed');
+      if (!membershipFor(user, me.buildingId)) throw Forbidden('Building admin required');
+    } else {
+      throw Forbidden('Not allowed');
+    }
+
+    user.status = nextStatus;
+    if (nextStatus === 'suspended') {
+      // Kill the refresh token + bump sessionsRevokedAt so in-flight access
+      // tokens are rejected on the next request.
+      user.refreshTokenHash = null;
+      user.sessionsRevokedAt = new Date();
+    }
+    await user.save();
+
+    // Suspending the last building admin of a building leaves it unmanaged —
+    // deactivate that building (reactivatable once an admin is reassigned).
+    if (nextStatus === 'suspended') {
+      const buildingsWhereAdmin = user.memberships.filter((m) => m.isBuildingAdmin).map((m) => m.buildingId);
+      for (const bId of buildingsWhereAdmin) {
+        const remaining = await User.countDocuments({
+          _id: { $ne: user._id },
+          memberships: { $elemMatch: { buildingId: bId, isBuildingAdmin: true } },
+          status: { $in: ['active', 'invited'] },
+        });
+        if (remaining === 0) await Building.findByIdAndUpdate(bId, { status: 'inactive' });
+      }
+    }
+
+    // Building-admin callers get the roster row for their building; the system
+    // admin gets the full user JSON.
+    res.json({ user: me.buildingId ? rosterRow(user, me.buildingId) : user.toJSON() });
   })
 );
 
@@ -53,17 +225,18 @@ router.patch(
   requireSystemAdmin,
   validate(roleSchema),
   asyncHandler(async (req, res) => {
-    const me = (req as AuthedRequest).user;
     const nextRole = (req.body as { role: 'admin' | 'owner' }).role;
-    const target = await User.findOne({ _id: req.params.id, buildingId: me.buildingId });
+    const target = await User.findById(req.params.id);
     if (!target) throw NotFound('User not found');
-    if (nextRole === 'admin' && target.role !== 'owner') {
-      throw BadRequest('Only an owner can be promoted to admin.');
+    if (nextRole === 'admin') {
+      if (target.systemRole === 'admin') throw BadRequest('Already a system admin.');
+      // Becoming a system super-admin drops all building memberships.
+      target.systemRole = 'admin';
+      target.memberships.splice(0, target.memberships.length);
+    } else {
+      if (target.systemRole !== 'admin') throw BadRequest('Only a system admin can be demoted.');
+      target.systemRole = 'member';
     }
-    if (nextRole === 'owner' && target.role !== 'admin') {
-      throw BadRequest('Demotion is only allowed from admin back to owner.');
-    }
-    target.role = nextRole;
     await target.save();
     res.json({ user: target.toJSON() });
   })
@@ -96,7 +269,7 @@ router.patch(
   asyncHandler(async (req, res) => {
     const me = (req as AuthedRequest).user;
     const body = req.body as z.infer<typeof settingsSchema>;
-    const target = await User.findOne({ _id: req.params.id, buildingId: me.buildingId });
+    const target = await User.findOne({ _id: req.params.id, 'memberships.buildingId': me.buildingId });
     if (!target) throw NotFound('User not found');
     target.settings = target.settings ?? ({} as typeof target.settings);
     if (body.maxDependents !== undefined) target.settings.maxDependents = body.maxDependents;

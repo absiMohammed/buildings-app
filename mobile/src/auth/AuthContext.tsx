@@ -22,7 +22,7 @@ import { EMPTY_CAPABILITIES } from './capabilities';
 const VIEW_MODE_STORAGE_KEY = 'ba_view_mode';
 export type ViewMode = 'owner' | 'admin';
 
-export type Role = 'admin' | 'owner' | 'renter' | 'dependent';
+export type Role = 'admin' | 'owner' | 'renter' | 'dependent' | 'independent';
 
 export interface BuildingSummary {
   _id: string;
@@ -37,6 +37,12 @@ export interface BuildingSummary {
     // Anchor for per-user geo-fences. Per-user UserSettings only stores
     // radiusMeters + allowedActions; the center is read from here.
     geoCenter?: { lat?: number | null; lng?: number | null };
+    // Admin-configurable building access controls.
+    access?: {
+      gate?: { enabled?: boolean; label?: string };
+      door?: { enabled?: boolean; label?: string };
+      elevator?: { enabled?: boolean; label?: string };
+    };
   };
 }
 
@@ -65,17 +71,34 @@ export interface UserSettings {
   custom?: Record<string, string>;
 }
 
+/** One building the user belongs to — used to render the building switcher. */
+export interface MembershipSummary {
+  buildingId: string;
+  buildingName: string;
+  role: Role;
+  isBuildingAdmin: boolean;
+  unitIds: string[];
+}
+
 export interface CurrentUser {
   _id: string;
   email: string;
+  phone?: string;
   firstName?: string;
   lastName?: string;
   role: Role;
+  /** Every building the user belongs to (empty for the system admin). */
+  memberships?: MembershipSummary[];
+  /** The building the session is currently scoped to. */
+  activeBuildingId?: string | null;
   // System admin (role==='admin') is building-agnostic; for every other
   // role this is guaranteed to be a non-null id.
   buildingId: string | null;
   unitId?: string | null;
   status: 'invited' | 'active' | 'suspended';
+  /** Set on admin-created / reset accounts; the app forces a password change
+   *  on first login until the user picks their own. */
+  mustChangePassword?: boolean;
   capabilities?: Capabilities;
   /** Building-admin overlay capabilities. Non-null only when role==='owner'
    * AND isBuildingAdmin===true. Mobile swaps to these when the user toggles
@@ -92,12 +115,14 @@ interface AuthCtx {
   user: CurrentUser | null;
   building: BuildingSummary | null;
   loading: boolean;
-  login(identifier: string, password: string): Promise<void>;
+  login(identifier: string, password: string): Promise<CurrentUser>;
   /** Prompt biometrics and sign in using the keychain-stored refresh token.
    * Returns true on success, false if the prompt was cancelled or the
    * stored token was rejected (in which case caller should fall back to
    * the password form). */
   loginWithBiometric(promptTitle: string): Promise<boolean>;
+  /** Exchange a stored refresh token (per-account biometric/PIN) for a session. */
+  loginWithRefreshToken(refreshToken: string): Promise<boolean>;
   /** Move the current session's refresh token into the OS keychain behind
    * biometrics so future launches can quick-unlock. */
   enableBiometric(): Promise<void>;
@@ -105,6 +130,10 @@ interface AuthCtx {
   acceptInvite(token: string, password: string, names: { firstName?: string; lastName?: string }): Promise<void>;
   refreshMe(): Promise<void>;
   updateBuilding(b: BuildingSummary): void;
+  /** Re-scope the session to another building the user belongs to. */
+  switchBuilding(buildingId: string): Promise<void>;
+  /** Change own password (also clears the must-change flag server-side). */
+  changePassword(currentPassword: string, newPassword: string): Promise<void>;
   /**
    * Current view mode for building-admin owners. `'owner'` by default;
    * flips to `'admin'` when the user taps the header chip. Persisted so it
@@ -196,9 +225,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const r = await api.get('/me');
       applyUser(r.data.user);
-    } catch {
+    } catch (err) {
       applyUser(null);
-      await clearTokens();
+      // Only wipe the session when the server rejected it. A network
+      // failure (offline launch, backend blip) keeps the tokens so the
+      // session survives until connectivity returns.
+      const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+      if (status === 401 || status === 403) {
+        await clearTokens();
+      }
     } finally {
       setLoading(false);
     }
@@ -209,6 +244,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await loadTokens();
       await refreshMe();
     })();
+    // Mount-only bootstrap; refreshMe is re-created each render by design.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // When the API client's refresh attempt fails (refresh token expired,
@@ -223,10 +260,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => setSessionExpiredHandler(null);
   }, []);
 
-  async function login(identifier: string, password: string) {
+  async function login(identifier: string, password: string): Promise<CurrentUser> {
     const r = await api.post('/auth/login', { identifier: identifier.trim(), password });
     await setTokens(r.data.accessToken, r.data.refreshToken);
     applyUser(r.data.user);
+    return r.data.user as CurrentUser;
   }
 
   // Biometric login: pull the keychain-stored refresh token, exchange it
@@ -247,6 +285,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Token rejected — most likely revoked or expired. Clear the
       // keychain so the user isn't stuck offering an invalid credential.
       await disableBiometricLogin();
+      return false;
+    }
+  }
+
+  // Exchange a stored refresh token (from a per-account biometric or PIN
+  // credential) for a live session. Returns false if the token is rejected.
+  async function loginWithRefreshToken(refreshToken: string): Promise<boolean> {
+    try {
+      const r = await axios.post(`${API_BASE_URL}/auth/refresh`, { refreshToken });
+      await setTokens(r.data.accessToken, r.data.refreshToken ?? refreshToken);
+      await refreshMe();
+      return true;
+    } catch {
       return false;
     }
   }
@@ -283,6 +334,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser((u) => (u ? { ...u, building: b } : u));
   }
 
+  async function switchBuilding(buildingId: string) {
+    const r = await api.post('/auth/switch-building', { buildingId });
+    // Only the access token changes; the refresh token stays valid.
+    await setTokens(r.data.accessToken, getRefreshToken());
+    applyUser(r.data.user);
+  }
+
+  async function changePassword(currentPassword: string, newPassword: string) {
+    const r = await api.post('/me/password', { currentPassword, newPassword });
+    // Server rotates sessions; adopt the fresh pair so we stay logged in.
+    if (r.data?.accessToken) await setTokens(r.data.accessToken, r.data.refreshToken ?? getRefreshToken());
+    await refreshMe();
+  }
+
   return (
     <AuthContext.Provider
       value={{
@@ -291,11 +356,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loading,
         login,
         loginWithBiometric,
+        loginWithRefreshToken,
         enableBiometric,
         logout,
         acceptInvite,
         refreshMe,
         updateBuilding,
+        switchBuilding,
+        changePassword,
         viewMode,
         capabilities,
         canToggleAdminView,

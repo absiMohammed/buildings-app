@@ -1,5 +1,5 @@
 import { Types } from 'mongoose';
-import { User, type UserDoc } from '../models/User.js';
+import { User, type UserDoc, membershipFor, membershipsForBuilding, primaryMembership } from '../models/User.js';
 import { InviteToken } from '../models/InviteToken.js';
 import { Unit } from '../models/Unit.js';
 import {
@@ -14,7 +14,8 @@ import {
   type AccessTokenPayload,
 } from '../utils/jwt.js';
 import { BadRequest, Conflict, NotFound, Unauthorized, Forbidden } from '../utils/errors.js';
-import type { Role } from '../../../shared/types.js';
+import { sendOnboarding, buildOnboardingMessage, waMeLink } from './whatsapp.service.js';
+import type { BuildingRole } from '../../../shared/types.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -29,14 +30,32 @@ export function normalizePhone(v: string): string {
   return plus + trimmed.replace(/[^0-9]/g, '');
 }
 
-function tokenPayload(user: UserDoc): AccessTokenPayload {
+// Build the access-token payload for a user scoped to ONE active membership
+// (or the system-admin context). `activeBuildingId` selects which membership
+// is active; defaults to the first when omitted.
+export function tokenPayload(user: UserDoc, activeBuildingId?: string | null): AccessTokenPayload {
+  const sub = user._id.toString();
+  if (user.systemRole === 'admin') {
+    return { sub, role: 'admin', buildingId: null, unitId: null, isBuildingAdmin: false };
+  }
+  const m = primaryMembership(user, activeBuildingId ?? user.memberships[0]?.buildingId);
+  if (!m) throw Forbidden('This account is not attached to any building.');
   return {
-    sub: user._id.toString(),
-    role: user.role as Role,
-    // System admins have no home building; non-admins always do.
-    buildingId: user.buildingId ? user.buildingId.toString() : null,
-    unitId: user.unitId ? user.unitId.toString() : null,
+    sub,
+    role: m.role,
+    buildingId: String(m.buildingId),
+    unitId: m.unitIds?.[0] ? String(m.unitIds[0]) : null,
+    isBuildingAdmin: !!m.isBuildingAdmin,
   };
+}
+
+/** Re-mint an access token for a different building the user belongs to. */
+export async function switchActiveBuilding(userId: string, buildingId: string) {
+  const user = await User.findById(userId);
+  if (!user) throw Unauthorized('Account not found');
+  if (user.systemRole === 'admin') throw BadRequest('System admin has no building context');
+  if (!membershipFor(user, buildingId)) throw Forbidden('You do not belong to this building.');
+  return { user, accessToken: signAccessToken(tokenPayload(user, buildingId)) };
 }
 
 export async function loginWithPassword(identifier: string, password: string) {
@@ -66,12 +85,47 @@ export async function refresh(userId: string, jti: string) {
   if (!user) throw Unauthorized('Invalid refresh');
   if (user.refreshTokenHash !== jti) throw Unauthorized('Refresh token revoked');
 
+  // Rotate the refresh token on every use: mint a new secret, persist its
+  // hash (invalidating the presented token), and hand back the new pair.
+  // A replay of the old token now fails the hash check above → revoked.
   const accessToken = signAccessToken(tokenPayload(user));
-  return { accessToken };
+  const refreshRaw = randomToken(48);
+  user.refreshTokenHash = sha256(refreshRaw);
+  await user.save();
+  const refreshToken = signRefreshToken({ sub: user._id.toString(), jti: user.refreshTokenHash });
+  return { accessToken, refreshToken };
 }
 
 export async function logout(userId: string): Promise<void> {
   await User.findByIdAndUpdate(userId, { refreshTokenHash: null });
+}
+
+// Self-service password change. Verifies the current password, sets the new
+// one, clears the must-change flag, and rotates all sessions so any other
+// device holding the old credentials is forced to re-authenticate.
+export async function changePassword(
+  userId: string,
+  currentPassword: string,
+  newPassword: string,
+  activeBuildingId?: string | null,
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const user = await User.findById(userId);
+  if (!user || !user.passwordHash) throw Unauthorized('Invalid credentials');
+  const ok = await verifyPassword(currentPassword, user.passwordHash);
+  if (!ok) throw Unauthorized('Current password is incorrect');
+  user.passwordHash = await hashPassword(newPassword);
+  user.mustChangePassword = false;
+  // Revoke OTHER live sessions but keep THIS one alive: set the cutoff a few
+  // seconds in the past so the token we mint below (iat ≈ now) still passes,
+  // while any older access token is rejected. Then hand back a fresh pair so
+  // the caller isn't logged out by their own password change.
+  user.sessionsRevokedAt = new Date(Date.now() - 10_000);
+  const refreshRaw = randomToken(48);
+  user.refreshTokenHash = sha256(refreshRaw);
+  await user.save();
+  const accessToken = signAccessToken(tokenPayload(user, activeBuildingId));
+  const refreshToken = signRefreshToken({ sub: user._id.toString(), jti: user.refreshTokenHash });
+  return { accessToken, refreshToken };
 }
 
 // Revokes ALL live sessions for a user, not just the calling one. Bumps
@@ -88,23 +142,31 @@ export async function logoutAll(userId: string): Promise<void> {
 interface CreateInviteArgs {
   email?: string;
   phone?: string;
-  role: Role;
+  firstName?: string;
+  lastName?: string;
+  role: BuildingRole;
   buildingId: Types.ObjectId | string;
+  /** One or more units the user occupies in this building. */
+  unitIds?: (Types.ObjectId | string)[];
+  /** Compat: a single unit; folded into `unitIds`. */
   unitId?: Types.ObjectId | string | null;
   linkedOwnerId?: Types.ObjectId | string | null;
   invitedBy: Types.ObjectId | string;
-  /** When true, the User shell created for this invite is flagged as the
-   *  building admin (owner with elevated overlay). Only meaningful when
-   *  role === 'owner'; ignored otherwise. */
+  /** Flag this membership as the building admin. */
   isBuildingAdmin?: boolean;
 }
 
 export interface CreateInviteResult {
-  /** Always true — the user is created and ready to log in immediately. */
+  /** Always true — the user is created/updated and ready to log in. */
   sent: true;
   channel: 'email' | 'sms';
-  /** The default password the admin should share with the new user. */
-  defaultPassword: string;
+  /** Initial password to share — only present when a NEW user was created.
+   *  Adding a membership to an existing user returns no password. */
+  defaultPassword?: string;
+  /** True when this added a building to an already-existing phone. */
+  addedMembership?: boolean;
+  /** wa.me click-to-send link with the onboarding message pre-filled (new users). */
+  whatsappUrl?: string;
 }
 
 /**
@@ -118,51 +180,296 @@ export interface CreateInviteResult {
  * actually created.
  */
 export async function createInvite(args: CreateInviteArgs): Promise<CreateInviteResult> {
-  if (!args.email && !args.phone) throw BadRequest('email or phone is required');
-
-  const email = args.email?.toLowerCase().trim() || null;
   const phone = args.phone ? normalizePhone(args.phone) : null;
+  if (!phone) throw BadRequest('phone is required');
+  const email = args.email?.toLowerCase().trim() || null;
 
-  const lookup: Record<string, string> = {};
-  if (email) lookup.email = email;
-  if (phone) lookup.phone = phone;
-  const existing = lookup.email
-    ? await User.findOne({ email: lookup.email })
-    : phone
-      ? await User.findOne({ phone })
-      : null;
-  if (existing) throw Conflict('A user with this contact already exists');
-
-  // unitId is required EXCEPT when the system admin appoints the
-  // building admin before any units exist (`isBuildingAdmin: true`).
-  const appointingBuildingAdmin = args.role === 'owner' && !!args.isBuildingAdmin;
-  if (!appointingBuildingAdmin && !args.unitId) {
-    throw BadRequest('unitId is required for non-admin invites');
+  // Gather the requested units. 'independent' (guard/staff) and building-admin
+  // appointments before units exist may have none.
+  const unitIds = [
+    ...(args.unitIds ?? []),
+    ...(args.unitId ? [args.unitId] : []),
+  ].map((u) => new Types.ObjectId(String(u)));
+  const appointingBuildingAdmin = !!args.isBuildingAdmin;
+  const unitOptional = appointingBuildingAdmin || args.role === 'independent';
+  if (!unitOptional && unitIds.length === 0) {
+    throw BadRequest('At least one unit is required for this role.');
   }
-  if (args.unitId) {
-    const unit = await Unit.findById(args.unitId);
-    if (!unit) throw NotFound('Unit not found');
+  for (const uid of unitIds) {
+    const unit = await Unit.findOne({ _id: uid, buildingId: args.buildingId });
+    if (!unit) throw NotFound('Unit not found in this building');
   }
 
-  const defaultPassword = 'password';
-  const passwordHash = await hashPassword(defaultPassword);
-
-  // Synthetic email for phone-only users — the User schema requires a
-  // unique non-null email and a single placeholder collides across users.
-  const synthEmail = email ?? `phone+${phone?.replace(/[^0-9]/g, '')}@invite.local`;
-  await User.create({
-    email: synthEmail,
-    phone: phone ?? '',
-    passwordHash,
+  const membership = {
+    buildingId: new Types.ObjectId(String(args.buildingId)),
     role: args.role,
-    buildingId: args.buildingId,
-    unitId: args.unitId ?? null,
-    linkedOwnerId: args.linkedOwnerId ?? null,
-    status: 'active',
-    isBuildingAdmin: args.role === 'owner' ? !!args.isBuildingAdmin : false,
-  });
+    unitIds,
+    isBuildingAdmin: !!args.isBuildingAdmin,
+    linkedOwnerId: args.linkedOwnerId ? new Types.ObjectId(String(args.linkedOwnerId)) : null,
+  };
 
-  return { sent: true, channel: email ? 'email' : 'sms', defaultPassword };
+  // Keep Unit ownership/occupancy in sync so unit rosters + owner-scoped
+  // checks work: mark the user an occupant of each unit, and set ownerId for
+  // owner memberships.
+  async function syncUnits(userId: Types.ObjectId): Promise<void> {
+    if (!unitIds.length) return;
+    await Unit.updateMany({ _id: { $in: unitIds } }, { $addToSet: { occupants: userId } });
+    if (args.role === 'owner') {
+      await Unit.updateMany({ _id: { $in: unitIds } }, { $set: { ownerId: userId } });
+    }
+  }
+
+  // Phone is the global identity: if it already exists, ADD (or merge) a
+  // membership for this building instead of creating a duplicate account.
+  const existing = await User.findOne({ phone });
+
+  // Unit occupancy caps: at most ONE owner and ONE tenant per unit; followers
+  // (dependents) are unlimited. Checked per requested unit, excluding the user
+  // being created/edited. Independent staff hold no unit, so they're exempt.
+  if ((args.role === 'owner' || args.role === 'renter') && unitIds.length) {
+    for (const uid of unitIds) {
+      const holder = await User.findOne({
+        ...(existing ? { _id: { $ne: existing._id } } : {}),
+        memberships: { $elemMatch: { unitIds: uid, role: args.role } },
+        status: { $in: ['active', 'invited'] },
+      }).lean();
+      if (holder) {
+        throw Conflict(
+          args.role === 'owner' ? 'This unit already has an owner.' : 'This unit already has a tenant.',
+        );
+      }
+    }
+  }
+
+  if (existing) {
+    if (existing.systemRole === 'admin') throw Conflict('That number belongs to the system admin.');
+
+    // A user can hold different roles on different units of a building, but
+    // never two roles on the SAME unit. Reject if a requested unit is already
+    // held under a different role for this user in this building.
+    for (const uid of unitIds) {
+      const clash = membershipsForBuilding(existing, args.buildingId).find(
+        (m) => m.role !== args.role && m.unitIds.some((x) => String(x) === String(uid)),
+      );
+      if (clash) throw Conflict('This user already has a different role on that unit.');
+    }
+
+    // Memberships are keyed by (building, role): merge units into the matching
+    // role, or add a new membership for a new role in the same building.
+    const current = membershipFor(existing, args.buildingId, args.role);
+    if (current) {
+      const seen = new Set(current.unitIds.map((u) => String(u)));
+      for (const uid of unitIds) if (!seen.has(String(uid))) current.unitIds.push(uid);
+      if (membership.linkedOwnerId) current.linkedOwnerId = membership.linkedOwnerId;
+    } else {
+      existing.memberships.push(membership);
+    }
+    // Building-admin is a building-level flag — apply it to every membership
+    // the user holds in this building so it stays consistent.
+    if (args.isBuildingAdmin) {
+      for (const m of membershipsForBuilding(existing, args.buildingId)) m.isBuildingAdmin = true;
+    }
+    if (email && !existing.email) existing.email = email;
+    if (args.firstName && !existing.firstName) existing.firstName = args.firstName;
+    if (args.lastName && !existing.lastName) existing.lastName = args.lastName;
+    await existing.save();
+    await syncUnits(existing._id);
+    return { sent: true, channel: email ? 'email' : 'sms', addedMembership: true };
+  }
+
+  const defaultPassword = randomToken(9);
+  const passwordHash = await hashPassword(defaultPassword);
+  const created = await User.create({
+    phone,
+    email,
+    passwordHash,
+    firstName: args.firstName ?? '',
+    lastName: args.lastName ?? '',
+    systemRole: 'member',
+    memberships: [membership],
+    status: 'active',
+    mustChangePassword: true,
+  });
+  await syncUnits(created._id);
+
+  // Onboarding message with login + temporary password + app links. Fire-and-
+  // forget via the Cloud API (no-ops until configured), and also return a
+  // wa.me click-to-send link so the admin can deliver it manually right now.
+  const name = `${args.firstName ?? ''} ${args.lastName ?? ''}`.trim();
+  void sendOnboarding({ to: phone, name, phone, password: defaultPassword });
+  const whatsappUrl = waMeLink(phone, buildOnboardingMessage({ name, phone, password: defaultPassword }));
+
+  return { sent: true, channel: email ? 'email' : 'sms', defaultPassword, whatsappUrl };
+}
+
+/**
+ * Issue a fresh temporary password for a user and return it plus a wa.me
+ * click-to-send link with the new credentials — used to re-share a login
+ * (we never store the plaintext password, so "resend" = reset). Also revokes
+ * the user's live sessions so the old password stops working immediately.
+ */
+export async function resetUserCredentials(
+  userId: string,
+): Promise<{ defaultPassword: string; whatsappUrl: string }> {
+  const user = await User.findById(userId);
+  if (!user) throw NotFound('User not found');
+  const defaultPassword = randomToken(9);
+  user.passwordHash = await hashPassword(defaultPassword);
+  user.mustChangePassword = true;
+  user.refreshTokenHash = null;
+  user.sessionsRevokedAt = new Date();
+  await user.save();
+
+  const name = `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim();
+  const text = buildOnboardingMessage({ name, phone: user.phone, password: defaultPassword });
+  void sendOnboarding({ to: user.phone, name, phone: user.phone, password: defaultPassword });
+  return { defaultPassword, whatsappUrl: waMeLink(user.phone, text) };
+}
+
+/** A wa.me link to (re)send a user's login info — WITHOUT a password (we don't
+ *  store it). For "share how to sign in"; use resetUserCredentials to send a
+ *  working password. */
+export async function loginShareLink(userId: string): Promise<{ whatsappUrl: string }> {
+  const user = await User.findById(userId);
+  if (!user) throw NotFound('User not found');
+  const name = `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim();
+  const text = buildOnboardingMessage({ name, phone: user.phone });
+  return { whatsappUrl: waMeLink(user.phone, text) };
+}
+
+export interface MembershipInput {
+  buildingId: string;
+  role: BuildingRole;
+  unitIds?: string[];
+  isBuildingAdmin?: boolean;
+}
+
+/**
+ * System-admin edit of an existing user: name, login phone (globally unique),
+ * and the FULL set of building/unit/role memberships (replace semantics).
+ * Enforces the same rules as creation — units belong to their building, one
+ * owner / one tenant per unit, one role per unit for this user — and keeps
+ * Unit ownership/occupancy in sync.
+ */
+export async function updateUserByAdmin(
+  userId: string,
+  patch: { firstName?: string; lastName?: string; phone?: string; memberships?: MembershipInput[] },
+): Promise<UserDoc> {
+  const user = await User.findById(userId);
+  if (!user) throw NotFound('User not found');
+
+  if (patch.firstName !== undefined) user.firstName = patch.firstName;
+  if (patch.lastName !== undefined) user.lastName = patch.lastName;
+
+  if (patch.phone !== undefined) {
+    const phone = normalizePhone(patch.phone);
+    if (!phone) throw BadRequest('phone is required');
+    if (phone !== user.phone) {
+      const dupe = await User.findOne({ phone, _id: { $ne: user._id } }).lean();
+      if (dupe) throw Conflict('A user with this number already exists');
+      user.phone = phone;
+    }
+  }
+
+  if (patch.memberships) {
+    if (user.systemRole === 'admin') throw BadRequest('System admins have no building memberships.');
+
+    // Validate + build the new membership set.
+    const built: Array<{
+      buildingId: Types.ObjectId;
+      role: BuildingRole;
+      unitIds: Types.ObjectId[];
+      isBuildingAdmin: boolean;
+      linkedOwnerId: null;
+    }> = [];
+    const unitRole = new Map<string, BuildingRole>();
+    for (const d of patch.memberships) {
+      const bId = new Types.ObjectId(String(d.buildingId));
+      const unitIds = [...new Set((d.unitIds ?? []).map((x) => String(x)))].map((x) => new Types.ObjectId(x));
+      for (const uid of unitIds) {
+        const unit = await Unit.findOne({ _id: uid, buildingId: bId });
+        if (!unit) throw NotFound('Unit not found in this building');
+        const prev = unitRole.get(String(uid));
+        if (prev && prev !== d.role) throw Conflict('This user cannot have two roles on the same unit.');
+        unitRole.set(String(uid), d.role);
+        if (d.role === 'owner' || d.role === 'renter') {
+          const holder = await User.findOne({
+            _id: { $ne: user._id },
+            memberships: { $elemMatch: { unitIds: uid, role: d.role } },
+            status: { $in: ['active', 'invited'] },
+          }).lean();
+          if (holder) {
+            throw Conflict(d.role === 'owner' ? 'This unit already has an owner.' : 'This unit already has a tenant.');
+          }
+        }
+      }
+      built.push({ buildingId: bId, role: d.role, unitIds, isBuildingAdmin: !!d.isBuildingAdmin, linkedOwnerId: null });
+    }
+
+    // Old vs new unit sets (for occupancy/ownership sync) — computed BEFORE
+    // we replace the in-memory memberships.
+    const oldAll = new Set(user.memberships.flatMap((m) => m.unitIds.map((u) => String(u))));
+    const oldOwned = new Set(
+      user.memberships.filter((m) => m.role === 'owner').flatMap((m) => m.unitIds.map((u) => String(u))),
+    );
+    const newAll = new Set(built.flatMap((m) => m.unitIds.map((u) => String(u))));
+    const newOwned = new Set(built.filter((m) => m.role === 'owner').flatMap((m) => m.unitIds.map((u) => String(u))));
+
+    user.memberships.splice(0, user.memberships.length, ...(built as unknown as (typeof user.memberships)[number][]));
+    await user.save();
+
+    const toIds = (s: string[]) => s.map((x) => new Types.ObjectId(x));
+    const removed = [...oldAll].filter((u) => !newAll.has(u));
+    if (removed.length) {
+      await Unit.updateMany({ _id: { $in: toIds(removed) } }, { $pull: { occupants: user._id } });
+    }
+    const ownerCleared = [...oldOwned].filter((u) => !newOwned.has(u));
+    if (ownerCleared.length) {
+      await Unit.updateMany({ _id: { $in: toIds(ownerCleared) }, ownerId: user._id }, { $unset: { ownerId: '' } });
+    }
+    if (newAll.size) {
+      await Unit.updateMany({ _id: { $in: toIds([...newAll]) } }, { $addToSet: { occupants: user._id } });
+    }
+    if (newOwned.size) {
+      await Unit.updateMany({ _id: { $in: toIds([...newOwned]) } }, { $set: { ownerId: user._id } });
+    }
+    return user;
+  }
+
+  await user.save();
+  return user;
+}
+
+/**
+ * Create another system super-admin (building-agnostic). Returns a generated
+ * initial password for the creator to share; the new admin must change it.
+ */
+export async function createSystemAdmin(args: {
+  email?: string;
+  phone?: string;
+  firstName?: string;
+  lastName?: string;
+}): Promise<{ defaultPassword: string }> {
+  const phone = args.phone ? normalizePhone(args.phone) : null;
+  if (!phone) throw BadRequest('phone is required');
+  const email = args.email?.toLowerCase().trim() || null;
+  const existing = await User.findOne({ phone });
+  if (existing) throw Conflict('A user with this number already exists');
+
+  const defaultPassword = randomToken(9);
+  const passwordHash = await hashPassword(defaultPassword);
+  await User.create({
+    phone,
+    email,
+    passwordHash,
+    firstName: args.firstName ?? '',
+    lastName: args.lastName ?? '',
+    systemRole: 'admin',
+    memberships: [],
+    status: 'active',
+    mustChangePassword: true,
+  });
+  return { defaultPassword };
 }
 
 export async function acceptInvite(rawToken: string, password: string, names: { firstName?: string; lastName?: string; phone?: string }) {

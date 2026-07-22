@@ -13,6 +13,7 @@ import { hasModule, MODULES } from '../auth/capabilities';
 import { palette, radii, shadow, spacing, type } from './theme';
 import { QuickActionsModal } from './QuickActionsModal';
 import { BottomSheet } from './BottomSheet';
+import { Icon, type IconName } from './Icon';
 import { useT } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 import type { MainTabParamList } from '../navigation/types';
@@ -36,26 +37,27 @@ type TabRoute = keyof MainTabParamList;
 interface TabDef {
   route: TabRoute;
   labelKey: StringKey;
-  glyph: string;
+  // Symbolic icon name; null renders an empty filler slot.
+  icon: IconName | null;
   // When undefined, the tab is always visible (e.g. Home). Otherwise the
   // user's capabilities must include this module id.
   capability?: string;
 }
 
 const ALL_TABS: TabDef[] = [
-  { route: 'HomeTab', labelKey: 'nav_home', glyph: '⌂' },
-  { route: 'PaymentsTab', labelKey: 'nav_payments', glyph: '💳', capability: MODULES.PAYMENTS },
-  { route: 'PollsTab', labelKey: 'nav_polls', glyph: '🗳️', capability: MODULES.POLLS },
-  { route: 'DocumentsTab', labelKey: 'nav_docs', glyph: '📄', capability: MODULES.DOCUMENTS },
-  { route: 'MaintenanceTab', labelKey: 'nav_maintenance', glyph: '🔧', capability: MODULES.MAINTENANCE },
-  { route: 'ExpensesTab', labelKey: 'nav_expenses', glyph: '🧾', capability: MODULES.EXPENSES },
-  { route: 'UnitsTab', labelKey: 'nav_units', glyph: '🏢', capability: MODULES.UNITS },
-  { route: 'UsersTab', labelKey: 'nav_users', glyph: '👥', capability: MODULES.USERS },
-  { route: 'HouseholdTab', labelKey: 'nav_household', glyph: '🏠', capability: MODULES.HOUSEHOLD },
-  { route: 'BuildingsTab', labelKey: 'nav_buildings', glyph: '🏢', capability: MODULES.SYSTEM_BUILDINGS },
-  { route: 'AllUsersTab', labelKey: 'nav_users', glyph: '👥', capability: MODULES.SYSTEM_USERS },
-  { route: 'PricingTab', labelKey: 'nav_pricing', glyph: '💸', capability: MODULES.SYSTEM_PRICING },
-  { route: 'AdminPaymentsTab', labelKey: 'nav_admin_payments', glyph: '💳', capability: MODULES.SYSTEM_PAYMENTS },
+  { route: 'HomeTab', labelKey: 'nav_home', icon: 'home' },
+  { route: 'PaymentsTab', labelKey: 'nav_payments', icon: 'payments', capability: MODULES.PAYMENTS },
+  { route: 'PollsTab', labelKey: 'nav_polls', icon: 'polls', capability: MODULES.POLLS },
+  { route: 'DocumentsTab', labelKey: 'nav_docs', icon: 'documents', capability: MODULES.DOCUMENTS },
+  { route: 'MaintenanceTab', labelKey: 'nav_maintenance', icon: 'maintenance', capability: MODULES.MAINTENANCE },
+  { route: 'ExpensesTab', labelKey: 'nav_expenses', icon: 'expenses', capability: MODULES.EXPENSES },
+  { route: 'UnitsTab', labelKey: 'nav_units', icon: 'units', capability: MODULES.UNITS },
+  { route: 'UsersTab', labelKey: 'nav_users', icon: 'users', capability: MODULES.USERS },
+  { route: 'HouseholdTab', labelKey: 'nav_household', icon: 'household', capability: MODULES.HOUSEHOLD },
+  { route: 'BuildingsTab', labelKey: 'nav_buildings', icon: 'buildings', capability: MODULES.SYSTEM_BUILDINGS },
+  { route: 'AllUsersTab', labelKey: 'nav_users', icon: 'users', capability: MODULES.SYSTEM_USERS },
+  { route: 'PricingTab', labelKey: 'nav_pricing', icon: 'pricing', capability: MODULES.SYSTEM_PRICING },
+  { route: 'AdminPaymentsTab', labelKey: 'nav_admin_payments', icon: 'payments', capability: MODULES.SYSTEM_PAYMENTS },
 ];
 
 export function BottomTabBar({ state, navigation }: BottomTabBarProps) {
@@ -74,10 +76,10 @@ export function BottomTabBar({ state, navigation }: BottomTabBarProps) {
     const accessible = ALL_TABS.slice(1).filter((t) => !t.capability || hasModule(caps, t.capability));
     const hasOverflow = accessible.length > 2;
     const visible: TabDef[] = hasOverflow
-      ? [home, ...accessible.slice(0, 2), { route: 'HomeTab', labelKey: 'nav_more' as StringKey, glyph: '⋯' }]
+      ? [home, ...accessible.slice(0, 2), { route: 'HomeTab', labelKey: 'nav_more' as StringKey, icon: 'more' }]
       : [home, ...accessible];
     while (visible.length < 4) {
-      visible.push({ route: 'HomeTab', labelKey: '_empty' as unknown as StringKey, glyph: '' });
+      visible.push({ route: 'HomeTab', labelKey: '_empty' as unknown as StringKey, icon: null });
     }
     const overflow = hasOverflow ? accessible.slice(2) : [];
     return { leftTwo: visible.slice(0, 2), rightTwo: visible.slice(2, 4), moreTabs: overflow };
@@ -103,7 +105,7 @@ export function BottomTabBar({ state, navigation }: BottomTabBarProps) {
   }
 
   function handleTab(t: TabDef) {
-    if (t.glyph === '') return; // empty filler slot
+    if (t.icon === null) return; // empty filler slot
     if (t.labelKey === 'nav_more') {
       setMoreOpen(true);
       return;
@@ -122,7 +124,7 @@ export function BottomTabBar({ state, navigation }: BottomTabBarProps) {
               <TabButton
                 key={`${t.route}-${i}`}
                 tab={t}
-                active={currentRoute === t.route && t.glyph !== ''}
+                active={currentRoute === t.route && t.icon !== null}
                 onPress={() => handleTab(t)}
               />
             ))}
@@ -133,7 +135,7 @@ export function BottomTabBar({ state, navigation }: BottomTabBarProps) {
               <TabButton
                 key={`${t.route}-${i}`}
                 tab={t}
-                active={currentRoute === t.route && t.glyph !== ''}
+                active={currentRoute === t.route && t.icon !== null}
                 onPress={() => handleTab(t)}
               />
             ))}
@@ -149,7 +151,7 @@ export function BottomTabBar({ state, navigation }: BottomTabBarProps) {
               end={{ x: 1, y: 1 }}
               style={styles.fab}
             >
-              <Text style={styles.fabGlyph}>⚡</Text>
+              <Icon name="quick" size={26} color="#fff" strokeWidth={2.4} />
             </LinearGradient>
           </TouchableOpacity>
         </View>
@@ -173,11 +175,14 @@ export function BottomTabBar({ state, navigation }: BottomTabBarProps) {
 
 function TabButton({ tab, active, onPress }: { tab: TabDef; active: boolean; onPress: () => void }) {
   const t = useT();
-  const label = tab.glyph === '' ? '' : t(tab.labelKey);
+  if (tab.icon === null) {
+    // Empty filler slot — keep the layout width, render nothing.
+    return <View style={styles.tab} />;
+  }
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.8} style={styles.tab} hitSlop={4}>
-      <Text style={[styles.tabGlyph, active && styles.tabGlyphActive]}>{tab.glyph}</Text>
-      <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text>
+      <Icon name={tab.icon} size={22} color={active ? palette.accent : palette.textSubtle} strokeWidth={active ? 2.4 : 2} />
+      <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{t(tab.labelKey)}</Text>
     </TouchableOpacity>
   );
 }
@@ -207,7 +212,7 @@ function MoreSheet({
             activeOpacity={0.85}
             onPress={() => onPick(tab.route)}
           >
-            <Text style={styles.moreGlyph}>{tab.glyph}</Text>
+            {tab.icon ? <Icon name={tab.icon} size={24} color={palette.text} /> : null}
             <Text style={styles.moreLabel}>{t(tab.labelKey)}</Text>
           </TouchableOpacity>
         ))}

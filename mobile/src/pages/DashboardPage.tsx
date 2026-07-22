@@ -1,6 +1,5 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import {
-  I18nManager,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -16,16 +15,16 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useAuth, useCurrency, type Role } from '../auth/AuthContext';
 import {
   ACTIONS,
-  EMPTY_CAPABILITIES,
   MODULES,
   WIDGETS,
   hasAction,
   hasModule,
   hasWidget,
 } from '../auth/capabilities';
-import { palette, radii, shadow, spacing, type } from '../components/theme';
+import { palette, shadow, spacing, type } from '../components/theme';
 import { ViewModeChip } from '../components/ViewModeChip';
 import { AdminDashboardPage } from './AdminDashboardPage';
+import { Icon, type IconName } from '../components/Icon';
 import {
   Card,
   IconCircle,
@@ -33,25 +32,25 @@ import {
   SectionHeader,
   StatCard,
 } from '../components/ui';
-import {
-  fmtMoney,
-  fmtMoneyCompact,
-  paymentsFor,
-  paymentsTrendFor,
-  type MockPoll,
-  ticketsFor,
-  relativeDay,
-} from '../mocks/fixtures';
-import { useMockStore } from '../mocks/store';
-import type { AppStackParamList } from '../navigation/types';
+import { fmtMoney, fmtMoneyCompact, relativeDay } from '../utils/format';
+import { listPayments, type Payment } from '../api/payments';
+import { listUnits, type Unit } from '../api/units';
+import { listPolls, type Poll } from '../api/polls';
+import { listMaintenance, type MaintenanceRequest } from '../api/maintenance';
+import { listUsers, type BuildingUser } from '../api/users';
+import { useApiResource } from '../api/useApiResource';
+import type { AppStackParamList, MainTabParamList } from '../navigation/types';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 
 interface ModuleEntry {
   id: string;
-  glyph: string;
+  icon: IconName;
   labelKey: StringKey;
-  route: keyof AppStackParamList;
+  // A bottom-tab route — tapping the tile switches to that tab's stack. Using
+  // the tab name (not a leaf screen) is what makes cross-section navigation
+  // actually work from the Home tab.
+  route: keyof MainTabParamList;
   tone: 'accent' | 'positive' | 'warning' | 'danger' | 'neutral';
 }
 
@@ -59,51 +58,104 @@ function roleKey(role: Role): StringKey {
   return role === 'admin' ? 'role_admin'
     : role === 'owner' ? 'role_owner'
     : role === 'renter' ? 'role_renter'
+    : role === 'independent' ? 'role_independent'
     : 'role_dependent';
 }
 
 const MODULE_REGISTRY: ModuleEntry[] = [
-  { id: MODULES.PAYMENTS, glyph: '💳', labelKey: 'nav_payments', route: 'Payments', tone: 'accent' },
-  { id: MODULES.EXPENSES, glyph: '🧾', labelKey: 'nav_expenses', route: 'Expenses', tone: 'warning' },
-  { id: MODULES.POLLS, glyph: '🗳️', labelKey: 'nav_polls', route: 'Polls', tone: 'positive' },
-  { id: MODULES.MAINTENANCE, glyph: '🔧', labelKey: 'nav_maintenance', route: 'Maintenance', tone: 'warning' },
-  { id: MODULES.DOCUMENTS, glyph: '📄', labelKey: 'nav_documents', route: 'Documents', tone: 'neutral' },
-  { id: MODULES.UNITS, glyph: '🏢', labelKey: 'nav_units', route: 'Units', tone: 'accent' },
-  { id: MODULES.USERS, glyph: '👥', labelKey: 'nav_users', route: 'Users', tone: 'neutral' },
+  { id: MODULES.PAYMENTS, icon: 'payments', labelKey: 'nav_payments', route: 'PaymentsTab', tone: 'accent' },
+  { id: MODULES.EXPENSES, icon: 'expenses', labelKey: 'nav_expenses', route: 'ExpensesTab', tone: 'warning' },
+  { id: MODULES.POLLS, icon: 'polls', labelKey: 'nav_polls', route: 'PollsTab', tone: 'positive' },
+  { id: MODULES.MAINTENANCE, icon: 'maintenance', labelKey: 'nav_maintenance', route: 'MaintenanceTab', tone: 'warning' },
+  { id: MODULES.DOCUMENTS, icon: 'documents', labelKey: 'nav_documents', route: 'DocumentsTab', tone: 'neutral' },
+  { id: MODULES.UNITS, icon: 'units', labelKey: 'nav_units', route: 'UnitsTab', tone: 'accent' },
+  { id: MODULES.USERS, icon: 'users', labelKey: 'nav_users', route: 'UsersTab', tone: 'neutral' },
+  { id: MODULES.HOUSEHOLD, icon: 'household', labelKey: 'nav_household', route: 'HouseholdTab', tone: 'positive' },
 ];
 
 export function DashboardPage() {
-  const { user, logout, capabilities: caps } = useAuth();
-  const currency = useCurrency();
-  const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
-  const [refreshing, setRefreshing] = useState(false);
+  const { user } = useAuth();
   const role = (user?.role ?? 'renter') as Role;
   // System admin operates above any one building — show the cross-tenant
   // ops dashboard instead of the resident dashboard.
   if (role === 'admin') return <AdminDashboardPage />;
-  const { units, users, polls } = useMockStore();
+  return <ResidentDashboard role={role} />;
+}
+
+interface DashboardData {
+  payments: Payment[];
+  units: Unit[];
+  polls: Poll[];
+  tickets: MaintenanceRequest[];
+  users: BuildingUser[];
+}
+
+/** Sum of paid payments per month, last 6 months, for the trend charts. */
+function buildTrend(payments: Payment[]): { label: string; value: number }[] {
+  const now = new Date();
+  const buckets: { label: string; value: number }[] = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const label = d.toLocaleDateString('en-US', { month: 'short' });
+    const value = payments
+      .filter((p) => {
+        if (p.status !== 'paid' || !p.paidAt) return false;
+        const pd = new Date(p.paidAt);
+        return pd.getFullYear() === d.getFullYear() && pd.getMonth() === d.getMonth();
+      })
+      .reduce((s, p) => s + p.amount, 0);
+    buckets.push({ label, value });
+  }
+  return buckets;
+}
+
+function ResidentDashboard({ role }: { role: Role }) {
+  const { user, logout, capabilities: caps } = useAuth();
+  const currency = useCurrency();
+  const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
   const { t, tf, locale } = useI18n();
 
-  const payments = useMemo(() => paymentsFor(role), [role]);
-  const trend = useMemo(() => paymentsTrendFor(role), [role]);
-  const tickets = useMemo(() => ticketsFor(role), [role]);
+  // The recent-activity widget needs the (admin-only) user roster; only
+  // fetch it when the viewer's capability set includes that section.
+  const wantsUsers = hasWidget(caps, WIDGETS.SECTION_RECENT_ACTIVITY);
+  const fetcher = useCallback(async (): Promise<DashboardData> => {
+    const [payments, units, polls, tickets] = await Promise.all([
+      listPayments(),
+      listUnits().catch(() => [] as Unit[]),
+      listPolls(),
+      listMaintenance(),
+    ]);
+    let users: BuildingUser[] = [];
+    if (wantsUsers) users = await listUsers().catch(() => [] as BuildingUser[]);
+    return { payments, units, polls, tickets, users };
+  }, [wantsUsers]);
+
+  const { data, loading, refreshing, error, refresh } = useApiResource(fetcher, 'Could not load your dashboard.');
+
+  const payments = useMemo(() => data?.payments ?? [], [data]);
+  const units = useMemo(() => data?.units ?? [], [data]);
+  const polls = useMemo(() => data?.polls ?? [], [data]);
+  const tickets = useMemo(() => data?.tickets ?? [], [data]);
+  const users = useMemo(() => data?.users ?? [], [data]);
+  const trend = useMemo(() => buildTrend(payments), [payments]);
 
   const outstanding = payments.filter((p) => p.status === 'pending' || p.status === 'overdue');
   const overdue = payments.filter((p) => p.status === 'overdue');
   const balance = outstanding.reduce((s, p) => s + p.amount, 0);
+  const now = new Date();
   const collectedMTD = payments
-    .filter((p) => p.status === 'paid' && p.paidDate && new Date(p.paidDate).getMonth() === new Date().getMonth())
+    .filter((p) => p.status === 'paid' && p.paidAt && new Date(p.paidAt).getMonth() === now.getMonth())
     .reduce((s, p) => s + p.amount, 0);
   const openPolls = polls.filter((p) => p.status === 'open').length;
-  const openTickets = tickets.filter((t) => t.status === 'open' || t.status === 'in_progress').length;
-  const nextDue = outstanding.sort((a, b) => +new Date(a.dueDate) - +new Date(b.dueDate))[0];
+  const openTickets = tickets.filter((tk) => tk.status === 'open' || tk.status === 'in_progress').length;
+  const occupiedUnits = units.filter((u) => u.occupants.length > 0).length;
+  const nextDue = [...outstanding].sort((a, b) => +new Date(a.dueDate) - +new Date(b.dueDate))[0];
 
   const allowedModules = MODULE_REGISTRY.filter((m) => hasModule(caps, m.id));
 
   const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 600);
-  }, []);
+    void refresh();
+  }, [refresh]);
 
   // Build stat cards from capability list (order matches the WIDGETS const).
   const statCards: { id: string; node: React.ReactNode }[] = [];
@@ -114,7 +166,7 @@ export function DashboardPage() {
     statCards.push({ id: WIDGETS.STAT_OUTSTANDING, node: <StatCard key="out" label={t('dash_stat_outstanding')} value={fmtMoneyCompact(balance, currency)} hint={overdue.length > 0 ? tf('dash_hint_overdue', { count: overdue.length }) : t('dash_hint_on_track')} tone={overdue.length > 0 ? 'danger' : 'neutral'} style={styles.statCard} /> });
   }
   if (hasWidget(caps, WIDGETS.STAT_ACTIVE_UNITS)) {
-    statCards.push({ id: WIDGETS.STAT_ACTIVE_UNITS, node: <StatCard key="units" label={t('dash_stat_active_units')} value={String(units.filter((u) => u.occupancyStatus === 'occupied').length)} hint={tf('dash_hint_of_total', { count: units.length })} tone="accent" style={styles.statCard} /> });
+    statCards.push({ id: WIDGETS.STAT_ACTIVE_UNITS, node: <StatCard key="units" label={t('dash_stat_active_units')} value={String(occupiedUnits)} hint={tf('dash_hint_of_total', { count: units.length })} tone="accent" style={styles.statCard} /> });
   }
   if (hasWidget(caps, WIDGETS.STAT_OPEN_TICKETS)) {
     statCards.push({ id: WIDGETS.STAT_OPEN_TICKETS, node: <StatCard key="tk" label={t('dash_stat_open_tickets')} value={String(openTickets)} hint={openTickets ? t('dash_hint_attention') : t('dash_hint_clear')} tone={openTickets ? 'warning' : 'neutral'} style={styles.statCard} /> });
@@ -129,7 +181,16 @@ export function DashboardPage() {
     statCards.push({ id: WIDGETS.STAT_OPEN_POLLS, node: <StatCard key="polls" label={t('dash_stat_open_polls')} value={String(openPolls)} hint={t('dash_hint_awaiting_votes')} tone="accent" style={styles.statCard} /> });
   }
   if (hasWidget(caps, WIDGETS.STAT_YOUR_UNIT)) {
-    statCards.push({ id: WIDGETS.STAT_YOUR_UNIT, node: <StatCard key="unit" label={t('dash_stat_your_unit')} value="8B" hint={tf('dash_hint_unit_meta', { bedrooms: 3, floor: 8 })} tone="neutral" style={styles.statCard} /> });
+    const myUnit = user?.unit ?? null;
+    statCards.push({ id: WIDGETS.STAT_YOUR_UNIT, node: <StatCard key="unit" label={t('dash_stat_your_unit')} value={myUnit?.number ?? '—'} hint="" tone="neutral" style={styles.statCard} /> });
+  }
+
+  if (loading && !data) {
+    return (
+      <SafeAreaView edges={['top', 'left', 'right']} style={[styles.container, styles.centered]}>
+        <Text style={type.small}>{t('loading')}</Text>
+      </SafeAreaView>
+    );
   }
 
   return (
@@ -138,6 +199,9 @@ export function DashboardPage() {
         contentContainerStyle={styles.scroll}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       >
+      {error && !data && (
+        <Text style={[type.small, styles.errorBanner]}>{error}</Text>
+      )}
       {/* Hero */}
       <View style={styles.heroWrap}>
         <LinearGradient
@@ -162,7 +226,7 @@ export function DashboardPage() {
               onPress={() => navigation.navigate('Settings')}
               activeOpacity={0.85}
             >
-              <Text style={styles.heroIconText}>⚙</Text>
+              <Icon name="settings" size={18} color="#fff" />
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.heroIconBtn}
@@ -170,7 +234,7 @@ export function DashboardPage() {
               onPress={() => void logout()}
               activeOpacity={0.85}
             >
-              <Text style={styles.heroIconText}>{I18nManager.isRTL ? '↩' : '↪'}</Text>
+              <Icon name="logout" size={18} color="#fff" />
             </TouchableOpacity>
           </View>
         </View>
@@ -207,7 +271,7 @@ export function DashboardPage() {
           <SectionHeader title={t('dash_modules')} />
           <View style={styles.quickGrid}>
             {allowedModules.map((m) => (
-              <ModuleTile key={m.id} module={m} onPress={() => navigation.navigate(m.route)} />
+              <ModuleTile key={m.id} module={m} onPress={() => navigation.getParent()?.navigate(m.route as never)} />
             ))}
           </View>
         </>
@@ -226,7 +290,7 @@ export function DashboardPage() {
         <>
           <SectionHeader title={t('dash_section_by_category')} />
           <Card>
-            <PaymentsByCategoryChart currency={currency} />
+            <PaymentsByCategoryChart currency={currency} payments={payments} />
           </Card>
         </>
       )}
@@ -272,7 +336,7 @@ function ModuleTile({ module, onPress }: { module: ModuleEntry; onPress: () => v
   return (
     <TouchableOpacity style={styles.moduleTile} activeOpacity={0.85} onPress={onPress}>
       <View style={[styles.moduleIcon, { backgroundColor: tone.soft }]}>
-        <Text style={styles.moduleGlyph}>{module.glyph}</Text>
+        <Icon name={module.icon} size={24} color={tone.fg} />
       </View>
       <Text style={styles.moduleLabel}>{t(module.labelKey)}</Text>
       <View style={[styles.moduleStripe, { backgroundColor: tone.fg }]} />
@@ -311,14 +375,16 @@ function CollectionsChart({ trend, currency }: { trend: { label: string; value: 
   );
 }
 
-function PaymentsByCategoryChart({ currency }: { currency: string }) {
+function PaymentsByCategoryChart({ currency, payments }: { currency: string; payments: Payment[] }) {
   const { t } = useI18n();
-  // Owner-perspective: rent collected from renter + dues/util paid to building.
+  // Break the building's real payments down by type.
+  const sumByType = (type: Payment['type']) =>
+    payments.filter((p) => p.type === type).reduce((s, p) => s + p.amount, 0);
   const data = [
-    { value: 1200 * 4, text: t('dash_legend_rent_in'), color: palette.accent },
-    { value: 1450 * 4, text: t('dash_legend_dues'), color: palette.warning },
-    { value: 180 * 4, text: t('dash_legend_util'), color: palette.success },
-  ];
+    { value: sumByType('monthly_dues'), text: t('dash_legend_dues'), color: palette.warning },
+    { value: sumByType('expense_split'), text: t('dash_legend_util'), color: palette.success },
+    { value: sumByType('one_off'), text: t('dash_legend_rent_in'), color: palette.accent },
+  ].filter((d) => d.value > 0);
   const total = data.reduce((s, d) => s + d.value, 0);
   return (
     <View style={{ alignItems: 'center' }}>
@@ -370,7 +436,7 @@ function PaymentHistoryChart({ trend, currency: _currency }: { trend: { label: s
   );
 }
 
-function PollsChart({ polls }: { polls: MockPoll[] }) {
+function PollsChart({ polls }: { polls: Poll[] }) {
   const { t } = useI18n();
   const opened = polls.filter((p) => p.status === 'open').length;
   const closed = polls.filter((p) => p.status === 'closed').length;
@@ -393,7 +459,7 @@ function PollsChart({ polls }: { polls: MockPoll[] }) {
   );
 }
 
-function NeedsAttention({ tickets, payments, canInvite, currency }: { tickets: ReturnType<typeof ticketsFor>; payments: ReturnType<typeof paymentsFor>; canInvite: boolean; currency: string }) {
+function NeedsAttention({ tickets, payments, canInvite, currency }: { tickets: MaintenanceRequest[]; payments: Payment[]; canInvite: boolean; currency: string }) {
   const { t, tf } = useI18n();
   const overduePayments = payments.filter((p) => p.status === 'overdue');
   return (
@@ -401,7 +467,7 @@ function NeedsAttention({ tickets, payments, canInvite, currency }: { tickets: R
       <SectionHeader title={t('dash_section_needs_attention')} />
       <Card padded={false}>
         <ActivityRow
-          icon="!"
+          iconName="payments"
           tone="danger"
           title={tf(
             overduePayments.length === 1 ? 'dash_needs_overdue_title' : 'dash_needs_overdue_title_plural',
@@ -409,20 +475,20 @@ function NeedsAttention({ tickets, payments, canInvite, currency }: { tickets: R
           )}
           subtitle={tf('dash_needs_overdue_subtitle', {
             amount: fmtMoney(overduePayments.reduce((s, p) => s + p.amount, 0), currency),
-            units: overduePayments.map((p) => p.unitId).join(', ') || t('dash_needs_overdue_no_units'),
+            units: String(overduePayments.length) || t('dash_needs_overdue_no_units'),
           })}
         />
         <Divider />
         <ActivityRow
-          icon="🔧"
+          iconName="maintenance"
           tone="warning"
           title={tf('dash_needs_new_tickets', { count: tickets.filter((tk) => tk.status === 'open').length })}
-          subtitle={tickets[0] ? `${tickets[0].title} · ${tf('maint_place_unit', { n: tickets[0].unit })}` : t('dash_needs_no_tickets')}
+          subtitle={tickets[0] ? tickets[0].title : t('dash_needs_no_tickets')}
         />
         {canInvite && (
           <>
             <Divider />
-            <ActivityRow icon="👥" tone="accent" title={t('dash_needs_invite_pending')} subtitle={t('dash_needs_invite_subtitle')} />
+            <ActivityRow iconName="users" tone="accent" title={t('dash_needs_invite_pending')} subtitle={t('dash_needs_invite_subtitle')} />
           </>
         )}
       </Card>
@@ -430,7 +496,7 @@ function NeedsAttention({ tickets, payments, canInvite, currency }: { tickets: R
   );
 }
 
-function RecentActivity({ users }: { users: { _id: string; firstName: string; lastName: string; role: string; unit?: string; status: string }[] }) {
+function RecentActivity({ users }: { users: BuildingUser[] }) {
   const { t } = useI18n();
   return (
     <>
@@ -440,12 +506,12 @@ function RecentActivity({ users }: { users: { _id: string; firstName: string; la
           <View key={u._id}>
             <View style={styles.activityRow}>
               <View style={styles.activityAvatar}>
-                <Text style={styles.activityInitial}>{u.firstName[0]}</Text>
+                <Text style={styles.activityInitial}>{(u.firstName || u.phone || '?')[0]}</Text>
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={[type.body, { fontWeight: '600' }]}>{u.firstName} {u.lastName}</Text>
                 <Text style={type.small}>
-                  {t(roleKey(u.role as Role))}{u.unit ? ` · ${t('maint_place_unit').replace('{{n}}', u.unit)}` : ''}
+                  {t(roleKey(u.role as Role))}
                 </Text>
               </View>
               <Pill
@@ -461,7 +527,7 @@ function RecentActivity({ users }: { users: { _id: string; firstName: string; la
   );
 }
 
-function PaymentSummary({ nextDue, overdue, outstanding, balance, currency }: { nextDue?: ReturnType<typeof paymentsFor>[number]; overdue: number; outstanding: number; balance: number; currency: string }) {
+function PaymentSummary({ nextDue, overdue, outstanding, balance, currency }: { nextDue?: Payment; overdue: number; outstanding: number; balance: number; currency: string }) {
   const { t, tf } = useI18n();
   return (
     <>
@@ -474,11 +540,11 @@ function PaymentSummary({ nextDue, overdue, outstanding, balance, currency }: { 
                 <Text style={type.caption}>{tf('dash_due', { relative: relativeDay(nextDue.dueDate) })}</Text>
                 <Text style={[type.display, { marginTop: 4 }]}>{fmtMoney(nextDue.amount, currency)}</Text>
                 <Text style={[type.small, { marginTop: 2 }]}>
-                  {nextDue.type.replace('_', ' ')} · {tf('maint_place_unit', { n: nextDue.unitId })}
+                  {nextDue.type.replace(/_/g, ' ')}
                 </Text>
               </View>
               <Pill
-                label={nextDue.status === 'overdue' ? t('status_overdue') : nextDue.status === 'pending' ? t('status_pending') : nextDue.status === 'paid' ? t('status_paid') : t('status_partially_paid')}
+                label={nextDue.status === 'overdue' ? t('status_overdue') : nextDue.status === 'pending' ? t('status_pending') : t('status_paid')}
                 tone={nextDue.status === 'overdue' ? 'danger' : nextDue.status === 'pending' ? 'warning' : 'positive'}
               />
             </View>
@@ -496,7 +562,7 @@ function PaymentSummary({ nextDue, overdue, outstanding, balance, currency }: { 
   );
 }
 
-function DependentSection({ polls }: { polls: MockPoll[] }) {
+function DependentSection({ polls }: { polls: Poll[] }) {
   const { t, tf } = useI18n();
   const open = polls.filter((p) => p.status === 'open');
   return (
@@ -518,10 +584,10 @@ function DependentSection({ polls }: { polls: MockPoll[] }) {
   );
 }
 
-function ActivityRow({ icon, tone, title, subtitle }: { icon: string; tone: 'accent' | 'danger' | 'warning' | 'positive'; title: string; subtitle: string }) {
+function ActivityRow({ iconName, tone, title, subtitle }: { iconName: IconName; tone: 'accent' | 'danger' | 'warning' | 'positive'; title: string; subtitle: string }) {
   return (
     <View style={styles.activityRow}>
-      <IconCircle glyph={icon} tone={tone} size={36} />
+      <IconCircle iconName={iconName} tone={tone} size={36} />
       <View style={{ flex: 1 }}>
         <Text style={[type.body, { fontWeight: '600' }]}>{title}</Text>
         <Text style={type.small}>{subtitle}</Text>
@@ -545,6 +611,8 @@ function Divider() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
+  centered: { alignItems: 'center', justifyContent: 'center' },
+  errorBanner: { color: palette.danger, marginBottom: spacing.md },
   scroll: { padding: spacing.lg, paddingBottom: 120 },
   heroWrap: {
     marginBottom: spacing.lg,
@@ -577,7 +645,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.28)',
   },
-  heroIconText: { color: '#fff', fontSize: 17, fontWeight: '600' },
   heroBlob1: {
     position: 'absolute',
     top: -50,
@@ -632,7 +699,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  moduleGlyph: { fontSize: 24 },
   moduleLabel: { fontSize: 12, color: palette.text, fontWeight: '600', marginTop: 8, textAlign: 'center' },
   moduleStripe: {
     position: 'absolute',

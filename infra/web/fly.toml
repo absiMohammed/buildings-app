@@ -1,0 +1,17 @@
+# Fly.io config for the building-app web client (static SPA via nginx).
+# Deploy from the repo root:
+#   fly deploy --config infra/web/fly.toml --dockerfile infra/web/Dockerfile \
+#     --build-arg VITE_API_URL=https://building-app-api.fly.dev/api/v1
+app = "building-app-web"
+primary_region = "ams"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

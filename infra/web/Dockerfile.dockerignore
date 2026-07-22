@@ -1,0 +1,9 @@
+.git
+**/node_modules
+mobile
+firmware
+server/dist
+server/uploads
+client/dist
+**/*.log
+.env

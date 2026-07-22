@@ -1,0 +1,35 @@
+# Fly.io config for the building-app backend (Node/Express + WebSockets).
+# Deploy from the repo root:  fly deploy
+app = "building-app-api"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "4000"
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  # Always-on: this server drives the physical door/gate over WebSockets and
+  # sends reminders, so it must not sleep.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# NOTE: document uploads are written to ./uploads inside the machine, which is
+# ephemeral (lost on redeploy). Add a Fly volume mounted at /app/server/uploads,
+# or switch STORAGE_DRIVER=s3, before relying on stored documents in production.

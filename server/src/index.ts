@@ -36,12 +36,16 @@ async function bootstrap(): Promise<void> {
     res.json({ ok: true, env: env.NODE_ENV, time: new Date().toISOString() });
   });
 
-  // Tighter limit on auth routes
+  // Tighter limit on auth routes to blunt credential-stuffing / brute force.
   const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 30,
+    max: 10,
     standardHeaders: true,
     legacyHeaders: false,
+    // Only failed attempts count toward the limit, so a legitimate user
+    // logging in repeatedly isn't locked out.
+    skipSuccessfulRequests: true,
+    message: { error: { code: 'RATE_LIMITED', message: 'Too many attempts. Try again later.' } },
   });
   app.use('/api/v1/auth', authLimiter);
 

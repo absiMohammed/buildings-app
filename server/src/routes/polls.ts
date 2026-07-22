@@ -6,6 +6,9 @@ import { validate } from '../middleware/validate.js';
 import { type AuthedRequest } from '../middleware/auth.js';
 import { Poll } from '../models/Poll.js';
 import { Vote } from '../models/Vote.js';
+import { User } from '../models/User.js';
+import { Notification } from '../models/Notification.js';
+import { sendWhatsApp } from '../services/whatsapp.service.js';
 import { Forbidden, NotFound, BadRequest } from '../utils/errors.js';
 
 export const router = Router();
@@ -57,6 +60,28 @@ router.post(
       status,
       createdBy: me.sub,
     });
+
+    // Notify eligible residents when the poll opens immediately.
+    if (status === 'open' && me.buildingId) {
+      const recipients = await User.find({
+        buildingId: me.buildingId,
+        status: 'active',
+        role: { $in: body.eligibleRoles },
+      });
+      const waBody = `${poll.title} — a new poll is open for your vote. Closes ${new Date(body.closesAt).toDateString()}.`;
+      for (const u of recipients) {
+        await Notification.create({
+          userId: u._id,
+          buildingId: me.buildingId,
+          type: 'poll_open',
+          title: 'New poll open',
+          body: poll.title,
+          link: `/polls`,
+        });
+        await sendWhatsApp(u.phone, waBody);
+      }
+    }
+
     res.status(201).json({ poll });
   })
 );
@@ -88,7 +113,11 @@ router.post(
     const poll = await Poll.findOne({ _id: req.params.id, buildingId: me.buildingId });
     if (!poll) throw NotFound('Poll not found');
     if (poll.status !== 'open') throw BadRequest('Poll is not open');
-    if (!poll.eligibleRoles.includes(me.role)) throw Forbidden('You cannot vote on this poll');
+    // 'independent' (staff) is never in a poll's eligibleRoles, so the cast is
+    // safe — the check simply returns false and voting is forbidden for them.
+    if (!poll.eligibleRoles.includes(me.role as (typeof poll.eligibleRoles)[number])) {
+      throw Forbidden('You cannot vote on this poll');
+    }
 
     const { optionIds } = req.body as { optionIds: string[] };
     if (!poll.allowMultiple && optionIds.length !== 1)

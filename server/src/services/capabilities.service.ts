@@ -3,7 +3,7 @@
 // `capabilities.widgets` array returned by the API. Same for modules and
 // actions. Keep this list in sync with the mobile UI's gating checks.
 
-export type Role = 'admin' | 'owner' | 'renter' | 'dependent';
+export type Role = 'admin' | 'owner' | 'renter' | 'dependent' | 'independent';
 
 export type Capabilities = {
   widgets: string[];
@@ -207,11 +207,21 @@ const DEPENDENT_CAPS: Capabilities = {
   actions: [ACTIONS.TICKET_CREATE],
 };
 
+// Building staff with no apartment (guard, cleaner, etc.). Minimal surface:
+// notices/documents and maintenance reporting; primary use is the building
+// access controls (door/gate) which are governed by building settings, not caps.
+const INDEPENDENT_CAPS: Capabilities = {
+  widgets: [],
+  modules: [MODULES.DOCUMENTS, MODULES.MAINTENANCE],
+  actions: [ACTIONS.TICKET_CREATE],
+};
+
 const ROLE_MAP: Record<Role, Capabilities> = {
   admin: SYSTEM_ADMIN_CAPS,
   owner: OWNER_CAPS,
   renter: RENTER_CAPS,
   dependent: DEPENDENT_CAPS,
+  independent: INDEPENDENT_CAPS,
 };
 
 export function getCapabilitiesFor(role: Role): Capabilities {
@@ -229,43 +239,66 @@ export function getBuildingAdminCapabilities(): Capabilities {
 
 import { Building } from '../models/Building.js';
 import { Unit } from '../models/Unit.js';
-import type { Types } from 'mongoose';
+import { primaryMembership, membershipsForBuilding, type UserDoc } from '../models/User.js';
 
-interface UserLike {
-  role: Role;
-  buildingId?: Types.ObjectId | null;
-  unitId?: Types.ObjectId | null;
-  isBuildingAdmin?: boolean;
-  toJSON(): Record<string, unknown>;
-}
+/**
+ * Build the /me + login payload for a user, scoped to ONE active membership
+ * (or the system-admin context). Includes a `memberships` summary of every
+ * building the user belongs to so the client can offer a building switcher.
+ */
+export async function toUserPayload(
+  user: UserDoc,
+  activeBuildingId?: string | null,
+): Promise<Record<string, unknown>> {
+  const isAdmin = user.systemRole === 'admin';
+  const activeBid = activeBuildingId ?? user.memberships[0]?.buildingId ?? null;
+  const active = isAdmin ? null : primaryMembership(user, activeBid) ?? null;
+  const role: Role = isAdmin ? 'admin' : ((active?.role as Role) ?? 'independent');
+  const isBuildingAdmin = !isAdmin && !!active?.isBuildingAdmin;
 
-export async function toUserPayload(user: UserLike): Promise<Record<string, unknown>> {
-  // System admins are building-agnostic — no home building or unit on their
-  // payload. For other roles we hydrate both lookups in parallel.
-  const [building, unit] = await Promise.all([
-    user.buildingId ? Building.findById(user.buildingId).lean() : Promise.resolve(null),
-    user.unitId ? Unit.findById(user.unitId).lean() : Promise.resolve(null),
+  // Units for the active building = the union across all the user's roles in
+  // that building (they might be owner of one unit and tenant of another).
+  const activeUnitIds = active
+    ? membershipsForBuilding(user, activeBid).flatMap((m) => m.unitIds)
+    : [];
+
+  // Hydrate the active building + its units, and every building the user
+  // belongs to (for the switcher), in parallel.
+  const allBuildingIds = user.memberships.map((m) => m.buildingId);
+  const [building, activeUnits, allBuildings] = await Promise.all([
+    active ? Building.findById(active.buildingId).lean() : Promise.resolve(null),
+    activeUnitIds.length ? Unit.find({ _id: { $in: activeUnitIds } }).lean() : Promise.resolve([]),
+    allBuildingIds.length ? Building.find({ _id: { $in: allBuildingIds } }).lean() : Promise.resolve([]),
   ]);
-  const isBuildingAdminOwner = user.role === 'owner' && !!user.isBuildingAdmin;
+  const buildingName = new Map(allBuildings.map((b) => [String(b._id), b.name]));
 
-  // System-admin-controlled allow-list. Undefined = no restriction. Applied
-  // to non-admin users only; admin's own modules (SYSTEM_BUILDINGS) sit
-  // outside any building's list.
   const buildingEnabled: string[] | null =
-    user.role !== 'admin' && Array.isArray((building as { enabledModules?: string[] } | null)?.enabledModules)
+    !isAdmin && Array.isArray((building as { enabledModules?: string[] } | null)?.enabledModules)
       ? ((building as { enabledModules?: string[] }).enabledModules ?? null)
       : null;
   const filterCaps = (c: Capabilities): Capabilities =>
-    buildingEnabled
-      ? { ...c, modules: c.modules.filter((m) => buildingEnabled.includes(m)) }
-      : c;
+    buildingEnabled ? { ...c, modules: c.modules.filter((m) => buildingEnabled.includes(m)) } : c;
+
+  const memberships = user.memberships.map((m) => ({
+    buildingId: String(m.buildingId),
+    buildingName: buildingName.get(String(m.buildingId)) ?? '',
+    role: m.role,
+    isBuildingAdmin: !!m.isBuildingAdmin,
+    unitIds: (m.unitIds ?? []).map((u) => String(u)),
+  }));
+
+  const firstUnit = activeUnits[0];
 
   return {
     ...user.toJSON(),
-    capabilities: filterCaps(getCapabilitiesFor(user.role)),
-    // Owners flagged as building admin get a second cap set; the mobile UI
-    // swaps to this when the user toggles "admin view". Anyone else: null.
-    adminCapabilities: isBuildingAdminOwner ? filterCaps(getBuildingAdminCapabilities()) : null,
+    // Compat fields the client reads for the ACTIVE building context.
+    role,
+    buildingId: active ? String(active.buildingId) : null,
+    isBuildingAdmin,
+    activeBuildingId: active ? String(active.buildingId) : null,
+    memberships,
+    capabilities: filterCaps(getCapabilitiesFor(role)),
+    adminCapabilities: isBuildingAdmin ? filterCaps(getBuildingAdminCapabilities()) : null,
     building: building
       ? {
           _id: String(building._id),
@@ -276,13 +309,19 @@ export async function toUserPayload(user: UserLike): Promise<Record<string, unkn
           settings: building.settings,
         }
       : null,
-    unit: unit
+    unit: firstUnit
       ? {
-          _id: String(unit._id),
-          number: unit.number,
-          floor: unit.floor,
-          monthlyDuesAmount: unit.monthlyDuesAmount,
+          _id: String(firstUnit._id),
+          number: firstUnit.number,
+          floor: firstUnit.floor,
+          monthlyDuesAmount: firstUnit.monthlyDuesAmount,
         }
       : null,
+    units: activeUnits.map((u) => ({
+      _id: String(u._id),
+      number: u.number,
+      floor: u.floor,
+      monthlyDuesAmount: u.monthlyDuesAmount,
+    })),
   };
 }

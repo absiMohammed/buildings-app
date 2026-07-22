@@ -7,29 +7,33 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { fmtMoney, type MockUnit, type PaymentType } from '../mocks/fixtures';
+import { fmtMoney } from '../utils/format';
+import type { PaymentType } from '../api/payments';
+import type { Unit } from '../api/units';
 import { palette, radii, spacing, type, textStart } from './theme';
 import { Button } from './ui';
 import { BottomSheet } from './BottomSheet';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 
+// Charge types map onto the server's payment `type` enum. We reuse the
+// existing i18n labels where they line up closely enough.
 const CHARGE_TYPES: { value: PaymentType; labelKey: StringKey; glyph: string }[] = [
-  { value: 'special_assessment', labelKey: 'new_charge_type_special', glyph: '★' },
-  { value: 'building_dues', labelKey: 'new_charge_type_dues', glyph: '🏢' },
-  { value: 'utilities', labelKey: 'new_charge_type_utilities', glyph: '💡' },
+  { value: 'one_off', labelKey: 'new_charge_type_special', glyph: '★' },
+  { value: 'expense_split', labelKey: 'new_charge_type_utilities', glyph: '💡' },
+  { value: 'monthly_dues', labelKey: 'new_charge_type_dues', glyph: '🏢' },
 ];
 
 export interface NewChargeModalProps {
   open: boolean;
   onClose: () => void;
-  units: MockUnit[];
+  units: Unit[];
   currency: string;
   onCreate: (input: {
-    unitNumbers: string[];
+    unitIds: string[];
     amountPerUnit: number;
     type: PaymentType;
-    description: string;
+    notes: string;
     dueDate: string;
   }) => void;
 }
@@ -39,14 +43,13 @@ function isoFromDaysFromNow(days: number): string {
 }
 
 export function NewChargeModal({ open, onClose, units, currency, onCreate }: NewChargeModalProps) {
-  // Default to habitable units only — construction shouldn't be billed.
   const eligible = useMemo(
-    () => units.filter((u) => u.occupancyStatus !== 'under_construction'),
+    () => [...units].sort((a, b) => a.number.localeCompare(b.number, undefined, { numeric: true })),
     [units]
   );
 
   const [description, setDescription] = useState('');
-  const [chargeType, setChargeType] = useState<PaymentType>('special_assessment');
+  const [chargeType, setChargeType] = useState<PaymentType>('one_off');
   const [amountText, setAmountText] = useState('');
   const [daysFromNow, setDaysFromNow] = useState('14');
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -55,10 +58,10 @@ export function NewChargeModal({ open, onClose, units, currency, onCreate }: New
   useEffect(() => {
     if (!open) return;
     setDescription('');
-    setChargeType('special_assessment');
+    setChargeType('one_off');
     setAmountText('');
     setDaysFromNow('14');
-    setSelected(new Set(eligible.map((u) => u.number)));
+    setSelected(new Set(eligible.map((u) => u._id)));
   }, [open, eligible]);
 
   const amountN = parseFloat(amountText.replace(/,/g, ''));
@@ -66,21 +69,21 @@ export function NewChargeModal({ open, onClose, units, currency, onCreate }: New
   const validAmount = Number.isFinite(amountN) && amountN > 0;
   const validDays = Number.isFinite(daysN) && daysN >= 0 && daysN <= 365;
   const validDescription = description.trim().length > 0;
-  const selectedUnits = eligible.filter((u) => selected.has(u.number));
+  const selectedUnits = eligible.filter((u) => selected.has(u._id));
   const total = validAmount ? amountN * selectedUnits.length : 0;
   const valid = validAmount && validDays && validDescription && selectedUnits.length > 0;
 
-  function toggleUnit(num: string) {
+  function toggleUnit(id: string) {
     setSelected((s) => {
       const n = new Set(s);
-      if (n.has(num)) n.delete(num);
-      else n.add(num);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
       return n;
     });
   }
 
   function selectAll() {
-    setSelected(new Set(eligible.map((u) => u.number)));
+    setSelected(new Set(eligible.map((u) => u._id)));
   }
   function clearAll() {
     setSelected(new Set());
@@ -89,10 +92,10 @@ export function NewChargeModal({ open, onClose, units, currency, onCreate }: New
   function submit() {
     if (!valid) return;
     onCreate({
-      unitNumbers: selectedUnits.map((u) => u.number),
+      unitIds: selectedUnits.map((u) => u._id),
       amountPerUnit: amountN,
       type: chargeType,
-      description: description.trim(),
+      notes: description.trim(),
       dueDate: isoFromDaysFromNow(daysN),
     });
   }
@@ -167,11 +170,11 @@ export function NewChargeModal({ open, onClose, units, currency, onCreate }: New
 
       <ScrollView style={styles.unitList} nestedScrollEnabled>
         {eligible.map((u) => {
-          const checked = selected.has(u.number);
+          const checked = selected.has(u._id);
           return (
             <TouchableOpacity
               key={u._id}
-              onPress={() => toggleUnit(u.number)}
+              onPress={() => toggleUnit(u._id)}
               style={[styles.unitRow, checked && styles.unitRowActive]}
               activeOpacity={0.85}
             >
@@ -181,7 +184,7 @@ export function NewChargeModal({ open, onClose, units, currency, onCreate }: New
               <View style={{ flex: 1 }}>
                 <Text style={styles.unitLabel}>{tf('unit_filter_unit_prefix', { n: u.number })}</Text>
                 <Text style={styles.unitMeta}>
-                  {u.ownerName ?? t('units_unassigned')} · {t('new_unit_floor')} {u.floor}
+                  {t('new_unit_floor')} {u.floor ?? '—'}
                 </Text>
               </View>
             </TouchableOpacity>

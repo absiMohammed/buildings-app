@@ -23,7 +23,14 @@ export type AppStackParamList = {
   MyHousehold: undefined;
   Buildings: undefined;
   BuildingDetail: { buildingId: string };
-  BuildingUsers: { buildingId: string; buildingName?: string };
+  BuildingUsers: {
+    buildingId: string;
+    buildingName?: string;
+    unitId?: string;
+    unitNumber?: string;
+  };
+  BuildingActions: { buildingId: string; buildingName?: string; currency?: string };
+  BuildingUnits: { buildingId: string; buildingName?: string };
   AllUsers: undefined;
   AdminPricing: undefined;
   AdminPayments: undefined;

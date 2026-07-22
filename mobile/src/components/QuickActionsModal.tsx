@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
   Easing,
@@ -9,7 +9,9 @@ import {
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { palette, radii, shadow, spacing, type } from './theme';
+import { Icon, type IconName } from './Icon';
 import { BottomSheet } from './BottomSheet';
+import { useAuth } from '../auth/AuthContext';
 import { useT } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 import { fetchGateStatus, triggerGate, type DoorState } from '../api/gate';
@@ -26,6 +28,12 @@ export function QuickActionsModal({
   onClose: () => void;
 }) {
   const t = useT();
+  const { building } = useAuth();
+  const access = building?.settings?.access;
+  // Gate/door default on; elevator defaults off (opt-in) — matches the server.
+  const showGate = access?.gate?.enabled !== false;
+  const showDoor = access?.door?.enabled !== false;
+  const showElevator = access?.elevator?.enabled === true;
   const [doorState, setDoorState] = useState<DoorState>('unknown');
   const [gateOnline, setGateOnline] = useState<boolean>(false);
 
@@ -53,7 +61,10 @@ export function QuickActionsModal({
     };
   }, [open]);
 
-  async function onGateTrigger(): Promise<{ skipped?: boolean }> {
+  // Stable identity: the relay pulse must fire exactly once per tap, so
+  // this callback must not change between renders (the 5s status poll
+  // re-renders us, and TapActionCard keys its trigger effect on onPress).
+  const onGateTrigger = useCallback(async (): Promise<{ skipped?: boolean }> => {
     const r = await triggerGate();
     // Refresh immediately — the reed switch will have flipped within
     // a second of the relay pulse.
@@ -64,7 +75,7 @@ export function QuickActionsModal({
       })
       .catch(() => undefined);
     return { skipped: !!r.skipped };
-  }
+  }, []);
 
   return (
     <BottomSheet open={open} onClose={onClose}>
@@ -75,10 +86,12 @@ export function QuickActionsModal({
         {t('quick_actions_subtitle')}
       </Text>
 
+      {showDoor ? (
       <TapActionCard
-        glyph="🚪"
+        iconName="door"
         tone={['#4f46e5', '#7c3aed']}
         titleKey="qa_door_title"
+        titleOverride={access?.door?.label || undefined}
         hintKey="qa_door_hint"
         ctaKey="qa_door_cta"
         busyKey="qa_door_opening"
@@ -86,11 +99,14 @@ export function QuickActionsModal({
         errorKey="qa_gate_error"
         onPress={unlockDoor}
       />
+      ) : null}
 
+      {showGate ? (
       <TapActionCard
-        glyph="🚧"
+        iconName="gate"
         tone={['#475569', '#64748b']}
         titleKey="qa_gate_title"
+        titleOverride={access?.gate?.label || undefined}
         hintKey="qa_gate_hint"
         // Label + status strings flip based on the live door state from
         // the reed switch — pressing the button always pulses the relay
@@ -117,24 +133,29 @@ export function QuickActionsModal({
         }
         onPress={onGateTrigger}
       />
+      ) : null}
 
+      {showElevator ? (
       <TapActionCard
-        glyph="🛗"
+        iconName="elevator"
         tone={['#0284c7', '#0ea5e9']}
         titleKey="qa_elevator_title"
+        titleOverride={access?.elevator?.label || undefined}
         hintKey="qa_elevator_hint"
         ctaKey="qa_elevator_cta"
         busyKey="qa_elevator_calling"
         doneKey="qa_elevator_arrived"
       />
+      ) : null}
     </BottomSheet>
   );
 }
 
 function TapActionCard({
-  glyph,
+  iconName,
   tone,
   titleKey,
+  titleOverride,
   hintKey,
   ctaKey,
   busyKey,
@@ -144,9 +165,11 @@ function TapActionCard({
   statusBadge,
   onPress,
 }: {
-  glyph: string;
+  iconName: IconName;
   tone: [string, string];
   titleKey: StringKey;
+  /** Admin-set custom label; overrides the default titleKey when present. */
+  titleOverride?: string;
   hintKey: StringKey;
   ctaKey: StringKey;
   busyKey: StringKey;
@@ -163,11 +186,21 @@ function TapActionCard({
   const t = useT();
   const [phase, setPhase] = useState<TapPhase>('idle');
   const pulse = useRef(new Animated.Value(0)).current;
+  // Latest onPress, read without making it an effect dependency — otherwise
+  // a re-render mid-"busy" would re-run the effect and fire the action twice.
+  const onPressRef = useRef(onPress);
+  onPressRef.current = onPress;
+  // Guards a single invocation per busy cycle.
+  const firedRef = useRef(false);
 
   useEffect(() => {
-    if (phase === 'idle') return;
+    if (phase === 'idle') {
+      firedRef.current = false;
+      return;
+    }
     let cancelled = false;
     if (phase === 'busy') {
+      const handler = onPressRef.current;
       Animated.loop(
         Animated.sequence([
           Animated.timing(pulse, {
@@ -184,17 +217,20 @@ function TapActionCard({
           }),
         ]),
       ).start();
-      if (onPress) {
-        onPress()
-          .then((result) => {
-            if (cancelled) return;
-            const skipped =
-              !!result &&
-              typeof result === 'object' &&
-              (result as { skipped?: boolean }).skipped === true;
-            setPhase(skipped ? 'skipped' : 'done');
-          })
-          .catch(() => !cancelled && setPhase('error'));
+      if (handler) {
+        if (!firedRef.current) {
+          firedRef.current = true;
+          handler()
+            .then((result) => {
+              if (cancelled) return;
+              const skipped =
+                !!result &&
+                typeof result === 'object' &&
+                (result as { skipped?: boolean }).skipped === true;
+              setPhase(skipped ? 'skipped' : 'done');
+            })
+            .catch(() => !cancelled && setPhase('error'));
+        }
       } else {
         const id = setTimeout(() => !cancelled && setPhase('done'), 1100);
         return () => {
@@ -217,7 +253,9 @@ function TapActionCard({
         clearTimeout(id);
       };
     }
-  }, [phase, pulse, onPress]);
+    // onPress is intentionally excluded — read via onPressRef so a re-render
+    // (e.g. the 5s status poll) can't re-run this effect and re-fire it.
+  }, [phase, pulse]);
 
   const busy = phase === 'busy';
   const done = phase === 'done';
@@ -237,7 +275,7 @@ function TapActionCard({
           end={{ x: 1, y: 1 }}
           style={styles.icon}
         >
-          <Text style={styles.iconGlyph}>{glyph}</Text>
+          <Icon name={iconName} size={22} color="#fff" />
           {busy && (
             <Animated.View
               style={[styles.iconRing, { opacity: ringOpacity }]}
@@ -246,7 +284,7 @@ function TapActionCard({
         </LinearGradient>
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text style={styles.cardTitle} numberOfLines={1}>
-            {t(titleKey)}
+            {titleOverride || t(titleKey)}
           </Text>
           <Text style={styles.cardHint} numberOfLines={2}>
             {t(hintKey)}
@@ -356,7 +394,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  iconGlyph: { fontSize: 22 },
   iconRing: {
     position: 'absolute',
     width: 60,

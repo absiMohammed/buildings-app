@@ -21,6 +21,30 @@ export const textStart: TextStyle = {
   writingDirection: _isRTL ? 'rtl' : 'ltr',
 };
 
+/**
+ * Wrap a phone number so it always renders left-to-right, even when embedded in
+ * an otherwise right-to-left (Arabic) line. Uses Unicode isolate marks so the
+ * leading "+" and digit order are never flipped. Mobile numbers are LTR with
+ * no exceptions — always run displayed numbers through this.
+ */
+const LRI = String.fromCharCode(0x2066); // left-to-right isolate
+const PDI = String.fromCharCode(0x2069); // pop directional isolate
+export const ltrPhone = (s: string): string => `${LRI}${s}${PDI}`;
+
+/**
+ * Pretty-print an E.164-ish phone for display: keeps a leading "+" and groups
+ * the digits in threes (e.g. "+970598000001" → "+970 598 000 001"). Pair with
+ * {@link ltrPhone} (or PhoneText) so it always reads left-to-right.
+ */
+export const formatPhone = (raw: string): string => {
+  const plus = raw.trim().startsWith('+');
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return raw;
+  const groups: string[] = [];
+  for (let i = 0; i < digits.length; i += 3) groups.push(digits.slice(i, i + 3));
+  return (plus ? '+' : '') + groups.join(' ');
+};
+
 export const palette = {
   bg: '#f7f8fa',
   surface: '#ffffff',

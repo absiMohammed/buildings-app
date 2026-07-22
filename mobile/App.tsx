@@ -4,7 +4,7 @@ import './src/components/textDefaults';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider } from './src/auth/AuthContext';
 import { LanguageProvider } from './src/i18n';
-import { MockStoreProvider } from './src/mocks/store';
+import { ConfirmProvider } from './src/components/ConfirmProvider';
 import { RootNavigator } from './src/navigation/RootNavigator';
 
 const queryClient = new QueryClient({
@@ -23,9 +23,9 @@ function App() {
         <QueryClientProvider client={queryClient}>
           <LanguageProvider>
             <AuthProvider>
-              <MockStoreProvider>
+              <ConfirmProvider>
                 <RootNavigator />
-              </MockStoreProvider>
+              </ConfirmProvider>
             </AuthProvider>
           </LanguageProvider>
         </QueryClientProvider>

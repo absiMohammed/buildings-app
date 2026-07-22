@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   I18nManager,
@@ -10,8 +10,30 @@ import {
   type TextStyle,
   type ViewStyle,
 } from 'react-native';
+import { Icon, type IconName } from './Icon';
 import LinearGradient from 'react-native-linear-gradient';
-import { palette, radii, shadow, spacing, type } from './theme';
+import { formatPhone, ltrPhone, palette, radii, shadow, spacing, type } from './theme';
+
+/**
+ * Renders a phone number that always reads left-to-right (leading "+" and digit
+ * order preserved) regardless of the app's RTL direction. Use for every
+ * displayed mobile number — no exceptions.
+ */
+export function PhoneText({
+  phone,
+  style,
+  numberOfLines,
+}: {
+  phone: string;
+  style?: StyleProp<TextStyle>;
+  numberOfLines?: number;
+}) {
+  return (
+    <Text numberOfLines={numberOfLines} style={[{ writingDirection: 'ltr' }, style]}>
+      {ltrPhone(formatPhone(phone))}
+    </Text>
+  );
+}
 
 export function Card({
   children,
@@ -31,9 +53,54 @@ const cardStyles = StyleSheet.create({
     borderRadius: radii.lg,
     borderWidth: 1,
     borderColor: palette.border,
+    // Consistent vertical gap between stacked cards; a page can override via
+    // the `style` prop (later in the style array wins), so no doubling.
+    marginBottom: spacing.md,
     ...shadow,
   },
   padded: { padding: spacing.lg },
+});
+
+/**
+ * A Card whose title lives inside it as a tappable header — press the header
+ * to expand / collapse the body. Body content supplies its own padding.
+ */
+export function CollapsibleCard({
+  title,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <Card padded={false}>
+      <TouchableOpacity
+        style={collapsibleStyles.header}
+        activeOpacity={0.7}
+        onPress={() => setOpen((v) => !v)}
+        accessibilityRole="button"
+      >
+        <Text style={collapsibleStyles.title}>{title}</Text>
+        <Icon name={open ? 'chevronUp' : 'chevronDown'} size={20} color={palette.textMuted} />
+      </TouchableOpacity>
+      {open ? <View style={collapsibleStyles.body}>{children}</View> : null}
+    </Card>
+  );
+}
+
+const collapsibleStyles = StyleSheet.create({
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  title: { ...type.body, fontWeight: '700', color: palette.text },
+  body: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.divider },
 });
 
 export function StatCard({
@@ -144,6 +211,81 @@ const pillStyles = StyleSheet.create({
   text: { fontSize: 12, fontWeight: '600', textTransform: 'capitalize' },
 });
 
+/**
+ * An inline, indicative message banner for warnings / info / errors — a soft
+ * tinted card with a leading icon bubble, an optional title, and an optional
+ * tap affordance. Use it wherever the app needs to flag something that "needs
+ * attention" instead of a bare colored Text line.
+ */
+const noticeTones = {
+  warning: { bg: palette.warningSoft, fg: palette.warning, icon: 'warning' as IconName },
+  danger: { bg: palette.dangerSoft, fg: palette.danger, icon: 'warning' as IconName },
+  info: { bg: palette.infoSoft, fg: palette.info, icon: 'bell' as IconName },
+  accent: { bg: palette.accentSoft, fg: palette.accent, icon: 'bell' as IconName },
+  success: { bg: palette.successSoft, fg: palette.success, icon: 'check' as IconName },
+} satisfies Record<string, { bg: string; fg: string; icon: IconName }>;
+
+export function Notice({
+  tone = 'warning',
+  icon,
+  title,
+  message,
+  onPress,
+  style,
+}: {
+  tone?: keyof typeof noticeTones;
+  icon?: IconName;
+  title?: string;
+  message: string;
+  onPress?: () => void;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const c = noticeTones[tone];
+  const chevron: IconName = I18nManager.isRTL ? 'chevronLeft' : 'chevronRight';
+  const body = (
+    <View style={[noticeStyles.wrap, { backgroundColor: c.bg }, style]}>
+      <View style={[noticeStyles.iconBubble, { borderColor: c.fg }]}>
+        <Icon name={icon ?? c.icon} size={16} color={c.fg} strokeWidth={2.4} />
+      </View>
+      <View style={noticeStyles.textWrap}>
+        {title ? <Text style={[noticeStyles.title, { color: c.fg }]}>{title}</Text> : null}
+        <Text style={[noticeStyles.message, { color: title ? palette.textMuted : c.fg }]}>
+          {message}
+        </Text>
+      </View>
+      {onPress ? <Icon name={chevron} size={18} color={c.fg} /> : null}
+    </View>
+  );
+  if (!onPress) return body;
+  return (
+    <TouchableOpacity onPress={onPress} activeOpacity={0.85}>
+      {body}
+    </TouchableOpacity>
+  );
+}
+
+const noticeStyles = StyleSheet.create({
+  wrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    padding: spacing.md,
+    borderRadius: radii.md,
+  },
+  iconBubble: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: palette.surface,
+  },
+  textWrap: { flex: 1, minWidth: 0, gap: 2 },
+  title: { fontSize: 14, fontWeight: '700' },
+  message: { fontSize: 13, fontWeight: '500', lineHeight: 18 },
+});
+
 export function Button({
   label,
   onPress,
@@ -249,12 +391,16 @@ const segmentedStyles = StyleSheet.create({
 });
 
 export function Avatar({ name, size = 36 }: { name: string; size?: number }) {
+  // Initials from the leading LETTER of each word — never digits or "+", so a
+  // phone-only (nameless) user shows a person glyph instead of a stray symbol.
   const initials = name
     .split(/\s+/)
     .filter(Boolean)
+    .map((p) => p[0])
+    .filter((ch) => !!ch && /\p{L}/u.test(ch))
     .slice(0, 2)
-    .map((p) => p[0]?.toUpperCase())
-    .join('') || '?';
+    .map((ch) => ch.toUpperCase())
+    .join('');
   return (
     <View
       style={{
@@ -266,7 +412,13 @@ export function Avatar({ name, size = 36 }: { name: string; size?: number }) {
         justifyContent: 'center',
       }}
     >
-      <Text style={{ color: palette.accent, fontWeight: '700', fontSize: size * 0.4 }}>{initials}</Text>
+      {initials ? (
+        <Text style={{ color: palette.accent, fontWeight: '700', fontSize: size * 0.4 }}>
+          {initials}
+        </Text>
+      ) : (
+        <Icon name="user" size={size * 0.55} color={palette.accent} />
+      )}
     </View>
   );
 }
@@ -275,16 +427,23 @@ export function EmptyState({
   title,
   body,
   icon,
+  iconName,
   action,
 }: {
   title: string;
   body?: string;
   icon?: string;
+  /** Symbolic icon (preferred over the legacy emoji `icon` string). */
+  iconName?: IconName;
   action?: { label: string; onPress: () => void };
 }) {
   return (
     <View style={emptyStyles.container}>
-      {icon ? <Text style={emptyStyles.icon}>{icon}</Text> : null}
+      {iconName ? (
+        <View style={{ marginBottom: spacing.sm }}>
+          <Icon name={iconName} size={34} color={palette.textSubtle} />
+        </View>
+      ) : icon ? <Text style={emptyStyles.icon}>{icon}</Text> : null}
       <Text style={emptyStyles.title}>{title}</Text>
       {body ? <Text style={emptyStyles.body}>{body}</Text> : null}
       {action ? (
@@ -346,7 +505,7 @@ const progressStyles = StyleSheet.create({
   fill: { height: '100%', borderRadius: radii.pill },
 });
 
-export function IconCircle({ glyph, tone = 'accent', size = 40 }: { glyph: string; tone?: 'accent' | 'positive' | 'warning' | 'danger' | 'neutral'; size?: number }) {
+export function IconCircle({ glyph, iconName, tone = 'accent', size = 40 }: { glyph?: string; iconName?: IconName; tone?: 'accent' | 'positive' | 'warning' | 'danger' | 'neutral'; size?: number }) {
   const map: Record<string, { bg: string; fg: string }> = {
     accent: { bg: palette.accentSoft, fg: palette.accent },
     positive: { bg: palette.successSoft, fg: palette.success },
@@ -366,7 +525,11 @@ export function IconCircle({ glyph, tone = 'accent', size = 40 }: { glyph: strin
         justifyContent: 'center',
       }}
     >
-      <Text style={{ fontSize: size * 0.5, color: t.fg }}>{glyph}</Text>
+      {iconName ? (
+        <Icon name={iconName} size={size * 0.5} color={t.fg} />
+      ) : (
+        <Text style={{ fontSize: size * 0.5, color: t.fg }}>{glyph}</Text>
+      )}
     </View>
   );
 }

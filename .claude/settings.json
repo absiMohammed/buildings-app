@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -sS -m 15 -o /dev/null -w \"status=%{http_code} final=%{url_effective}\\\\n\" https://building-app-web.fly.dev/)",
+      "Bash(curl -sS -m 15 https://building-app-web.fly.dev/)"
+    ]
+  }
+}

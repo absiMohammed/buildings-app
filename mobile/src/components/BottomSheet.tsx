@@ -19,6 +19,10 @@ const AnimatedBlur = Animated.createAnimatedComponent(BlurView);
 export interface BottomSheetProps {
   open: boolean;
   onClose: () => void;
+  /** Fired once the close animation finishes and the underlying Modal has
+   *  unmounted. Use this to safely present another Modal (e.g. a confirm
+   *  sheet) — presenting one while this is still dismissing freezes iOS. */
+  onClosed?: () => void;
   /** Center the content vertically instead of pinning it to the bottom. */
   centered?: boolean;
   /** Override the default rounded-top card style. */
@@ -33,9 +37,12 @@ export interface BottomSheetProps {
  * and a springy "splash" entrance for the sheet itself. No platform-default
  * modal slide animation; everything fades + scales in via Animated.
  */
-export function BottomSheet({ open, onClose, centered, cardStyle, hideHandle, children }: BottomSheetProps) {
+export function BottomSheet({ open, onClose, onClosed, centered, cardStyle, hideHandle, children }: BottomSheetProps) {
   // We keep the underlying Modal mounted until the close animation finishes.
   const [mounted, setMounted] = useState(open);
+  // Latest onClosed, read at animation-end without re-subscribing the effect.
+  const onClosedRef = useRef(onClosed);
+  onClosedRef.current = onClosed;
   const backdrop = useRef(new Animated.Value(0)).current;
   const blurAmount = useRef(new Animated.Value(0)).current;
   const sheetY = useRef(new Animated.Value(80)).current;
@@ -110,7 +117,10 @@ export function BottomSheet({ open, onClose, centered, cardStyle, hideHandle, ch
           useNativeDriver: true,
         }),
       ]).start(({ finished }) => {
-        if (finished) setMounted(false);
+        if (finished) {
+          setMounted(false);
+          onClosedRef.current?.();
+        }
       });
     }
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps

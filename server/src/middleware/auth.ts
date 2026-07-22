@@ -77,17 +77,14 @@ export const requireSystemAdmin: RequestHandler = (req, _res, next) => {
  * Handlers must still scope their queries by `me.buildingId` so a
  * building admin can't reach into a different building's data.
  */
-export const requireBuildingAdmin: RequestHandler = async (req, _res, next) => {
+export const requireBuildingAdmin: RequestHandler = (req, _res, next) => {
   const payload = (req as AuthedRequest).user;
   if (!payload) return next(Unauthorized());
-  if (payload.role !== 'owner') return next(Forbidden('Building admin required'));
-  try {
-    const user = await User.findById(payload.sub).select('isBuildingAdmin').lean();
-    if (!user?.isBuildingAdmin) return next(Forbidden('Building admin required'));
-    next();
-  } catch (err) {
-    next(err);
-  }
+  // The active membership must be a building role flagged as building admin.
+  // (Any building role can be a building admin, not just owners.)
+  if (payload.role === 'admin') return next(Forbidden('Building admin required'));
+  if (!payload.isBuildingAdmin || !payload.buildingId) return next(Forbidden('Building admin required'));
+  next();
 };
 
 /**
