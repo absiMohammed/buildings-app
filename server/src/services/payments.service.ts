@@ -21,11 +21,41 @@ export async function generateMonthlyDues(buildingId: string) {
   for (const unit of units) {
     // Per-unit overrides take precedence; falls back to building defaults.
     const day = unit.monthlyDuesDayOverride ?? defaultDay;
-    const amount = unit.monthlyDuesAmount ?? defaultAmount;
-    if (!amount || amount <= 0) continue; // nothing billable
     const dueDate = new Date(year, month, day);
     const startOfMonth = new Date(year, month, 1);
     const startOfNextMonth = new Date(year, month + 1, 1);
+
+    // Owner-set rent: billed monthly alongside dues, but only while a renter
+    // actually occupies the unit. The owner settles these charges directly.
+    const rentAmount = unit.monthlyRentAmount ?? 0;
+    if (rentAmount > 0) {
+      const hasRenter = await User.exists({
+        memberships: { $elemMatch: { unitIds: unit._id, role: 'renter' } },
+        status: { $in: ['active', 'invited'] },
+      });
+      const existingRent = hasRenter
+        ? await Payment.findOne({
+            unitId: unit._id,
+            type: 'rent',
+            dueDate: { $gte: startOfMonth, $lt: startOfNextMonth },
+          })
+        : null;
+      if (hasRenter && !existingRent) {
+        await Payment.create({
+          buildingId,
+          unitId: unit._id,
+          type: 'rent',
+          amount: rentAmount,
+          currency: building.currency,
+          dueDate,
+          status: 'pending',
+        });
+        generated++;
+      }
+    }
+
+    const amount = unit.monthlyDuesAmount ?? defaultAmount;
+    if (!amount || amount <= 0) continue; // nothing billable
     const existing = await Payment.findOne({
       unitId: unit._id,
       type: 'monthly_dues',

@@ -12,7 +12,7 @@ import {
   Pill,
   Segmented,
 } from '../components/ui';
-import { fmtMoney, relativeDay } from '../utils/format';
+import { fmtMoney, fmtMoneyCompact, relativeDay } from '../utils/format';
 import {
   createPayment,
   listPayments,
@@ -34,13 +34,12 @@ interface PaymentsData {
   units: Unit[];
 }
 
-// Reuse the existing dues label where it maps; otherwise prettify the raw type.
+// Every payment type has a translated label — never show a raw enum value.
 function paymentTypeLabel(pt: Payment['type'], t: ReturnType<typeof useI18n>['t']): string {
   if (pt === 'monthly_dues') return t('ptype_building_dues');
-  return pt
-    .split('_')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
+  if (pt === 'expense_split') return t('ptype_utilities');
+  if (pt === 'rent') return t('ptype_rent');
+  return t('ptype_special');
 }
 
 function paymentIcon(pt: Payment['type']): IconName {
@@ -51,15 +50,18 @@ function paymentIcon(pt: Payment['type']): IconName {
       return 'expenses';
     case 'one_off':
       return 'payments';
+    case 'rent':
+      return 'home';
   }
 }
 
 export function PaymentsPage() {
-  const { capabilities: caps } = useAuth();
+  const { capabilities: caps, user } = useAuth();
   const currency = useCurrency();
   const canCreate = hasAction(caps, ACTIONS.PAYMENT_CREATE);
   const canMarkPaid = hasAction(caps, ACTIONS.PAYMENT_MARK_PAID);
   const canRecord = hasAction(caps, ACTIONS.PAYMENT_RECORD);
+  const canManageRent = hasAction(caps, ACTIONS.RENT_MANAGE);
   const [filter, setFilter] = useState<FilterValue>('all');
   const [unitFilter, setUnitFilter] = useState<string>('all');
   const [receivingFor, setReceivingFor] = useState<Payment | null>(null);
@@ -75,8 +77,33 @@ export function PaymentsPage() {
     'Could not load payments.'
   );
 
-  const all = useMemo(() => data?.payments ?? [], [data]);
+  // The server returns building-wide payments to a building admin. When
+  // that admin flips to OWNER view (no mark-paid capability) they should
+  // see exactly what a plain owner sees: their own unit's payments only.
+  const myUnitIds = useMemo(
+    () =>
+      new Set(
+        [...(user?.units?.map((u) => u._id) ?? []), user?.unit?._id].filter(Boolean) as string[],
+      ),
+    [user],
+  );
+  const all = useMemo(() => {
+    const payments = data?.payments ?? [];
+    return canMarkPaid ? payments : payments.filter((p) => myUnitIds.has(p.unitId));
+  }, [data, canMarkPaid, myUnitIds]);
   const units = useMemo(() => data?.units ?? [], [data]);
+
+  // Rent charges on units the user OWNS are theirs to settle — even without
+  // the building-admin mark-paid capability.
+  const ownedUnitIds = useMemo(
+    () => new Set(units.filter((u) => u.ownerId === user?._id).map((u) => u._id)),
+    [units, user],
+  );
+  const canActOn = useCallback(
+    (p: Payment) =>
+      canMarkPaid || canRecord || (canManageRent && p.type === 'rent' && ownedUnitIds.has(p.unitId)),
+    [canMarkPaid, canRecord, canManageRent, ownedUnitIds],
+  );
 
   // Map unit id → number for display and for the unit filter.
   const numberOf = useCallback(
@@ -113,7 +140,10 @@ export function PaymentsPage() {
 
   async function markSelectedPaid(ids: string[]) {
     for (const id of ids) {
-      if (canMarkPaid) {
+      const p = all.find((x) => x._id === id);
+      // PATCH covers both the admin mark-paid path and the owner rent path;
+      // POST /:id/pay is the (admin-recorded) resident self-record fallback.
+      if (canMarkPaid || (p && canActOn(p))) {
         await updatePayment(id, { status: 'paid', paymentMethod: 'cash' });
       } else {
         await payPayment(id, { paymentMethod: 'cash' });
@@ -242,7 +272,7 @@ export function PaymentsPage() {
               payment={p}
               unitNumber={numberOf(p.unitId)}
               currency={currency}
-              canAct={(p.status === 'pending' || p.status === 'overdue') && (canMarkPaid || canRecord)}
+              canAct={(p.status === 'pending' || p.status === 'overdue') && canActOn(p)}
               canMarkPaid={canMarkPaid}
               onAct={() => setReceivingFor(p)}
             />
@@ -266,7 +296,10 @@ export function PaymentsPage() {
           unitNumber={numberOf(receivingFor.unitId)}
           currency={currency}
           openPayments={all.filter(
-            (p) => p.unitId === receivingFor.unitId && (p.status === 'pending' || p.status === 'overdue')
+            (p) =>
+              p.unitId === receivingFor.unitId &&
+              (p.status === 'pending' || p.status === 'overdue') &&
+              canActOn(p)
           )}
           lockedPaymentIds={[receivingFor._id]}
           onSubmit={({ selectedIds }) => void markSelectedPaid(selectedIds)}
@@ -282,7 +315,11 @@ function SummaryCard({ label, amount, currency, tone, onPress, active }: { label
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={[styles.summaryCard, { backgroundColor: bg }, active && { borderColor: fg, borderWidth: 2 }]}>
       <Text style={[styles.summaryLabel, { color: fg }]}>{label}</Text>
-      <Text style={[styles.summaryValue, { color: fg }]}>{fmtMoney(amount, currency)}</Text>
+      {/* Compact form — the full amount ("₪14,050.00") wraps inside the
+          three-across chips and breaks the row. */}
+      <Text style={[styles.summaryValue, { color: fg }]} numberOfLines={1}>
+        {fmtMoneyCompact(amount, currency)}
+      </Text>
     </TouchableOpacity>
   );
 }

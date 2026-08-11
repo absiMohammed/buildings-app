@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import {
@@ -24,10 +24,22 @@ export type ViewMode = 'owner' | 'admin';
 
 export type Role = 'admin' | 'owner' | 'renter' | 'dependent' | 'independent';
 
+export interface BuildingSubscription {
+  plan: 'trial' | 'basic' | 'pro' | 'premium' | null;
+  status: 'trial' | 'active' | 'suspended' | 'none';
+  trialEndsAt?: string | null;
+  currentPeriodEnd?: string | null;
+  /** Server-computed days remaining on the trial (0 when lapsed/not on trial). */
+  trialDaysLeft?: number;
+}
+
 export interface BuildingSummary {
   _id: string;
   name: string;
   currency: string;
+  status?: 'active' | 'inactive' | 'suspended';
+  stories?: number;
+  subscription?: BuildingSubscription | null;
   settings?: {
     monthlyDuesDay?: number;
     // Fallback used by any unit that doesn't set its own monthlyDue.
@@ -108,7 +120,21 @@ export interface CurrentUser {
   isBuildingAdmin?: boolean;
   building?: BuildingSummary | null;
   unit?: UnitSummary | null;
+  /** Every unit the user holds in the active building (owner of one,
+   *  tenant of another, …). `unit` is the primary/first of these. */
+  units?: UnitSummary[];
   settings?: UserSettings;
+}
+
+/** Payload for the self-service building signup (stepper form). */
+export interface RegisterBuildingPayload {
+  firstName: string;
+  lastName: string;
+  phone: string;
+  email?: string;
+  password: string;
+  building: { name: string; address?: string; currency?: string; stories: number };
+  apartment: { number: string; floor?: number };
 }
 
 interface AuthCtx {
@@ -116,6 +142,8 @@ interface AuthCtx {
   building: BuildingSummary | null;
   loading: boolean;
   login(identifier: string, password: string): Promise<CurrentUser>;
+  /** Self-service signup: creates building + founder account, signs in. */
+  registerBuilding(payload: RegisterBuildingPayload): Promise<CurrentUser>;
   /** Prompt biometrics and sign in using the keychain-stored refresh token.
    * Returns true on success, false if the prompt was cancelled or the
    * stored token was rejected (in which case caller should fall back to
@@ -160,23 +188,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState<boolean>(true);
   const [viewMode, setViewModeState] = useState<ViewMode>('owner');
 
+  // The saved view mode is keyed per user so it survives app relaunches and
+  // never leaks from one account to the next on the same device.
+  const viewModeKey = (userId: string) => `${VIEW_MODE_STORAGE_KEY}:${userId}`;
+  const lastUserIdRef = useRef<string | null>(null);
+
   function applyUser(payload: CurrentUser | null) {
     setUser(payload);
     setBuilding(payload?.building ?? null);
-    // Reset to owner view when the identity changes. Persist no view mode
-    // for a non-building-admin user (they can't toggle anyway).
-    setViewModeState('owner');
-    void AsyncStorage.removeItem(VIEW_MODE_STORAGE_KEY).catch(() => undefined);
+    // Reset to owner view only when the identity actually changes — a plain
+    // /me refresh for the same user must not wipe their chosen mode (the
+    // restore effect below re-reads it right after).
+    const nextId = payload?._id ?? null;
+    if (nextId !== lastUserIdRef.current) {
+      lastUserIdRef.current = nextId;
+      setViewModeState('owner');
+    }
   }
 
   // Restore last view mode for a building-admin owner. Skipped if the saved
   // mode no longer makes sense (e.g. their admin flag was revoked).
   useEffect(() => {
-    if (!user?.isBuildingAdmin || !user.adminCapabilities) return;
+    if (!user?._id || !user.isBuildingAdmin || !user.adminCapabilities) return;
+    const key = viewModeKey(user._id);
     let cancelled = false;
     (async () => {
       try {
-        const saved = (await AsyncStorage.getItem(VIEW_MODE_STORAGE_KEY)) as ViewMode | null;
+        const saved = (await AsyncStorage.getItem(key)) as ViewMode | null;
         if (!cancelled && (saved === 'admin' || saved === 'owner')) {
           setViewModeState(saved);
         }
@@ -205,7 +243,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   function setViewMode(mode: ViewMode): void {
     if (!canToggleAdminView && mode === 'admin') return;
     setViewModeState(mode);
-    void AsyncStorage.setItem(VIEW_MODE_STORAGE_KEY, mode).catch(() => undefined);
+    if (user?._id) {
+      void AsyncStorage.setItem(viewModeKey(user._id), mode).catch(() => undefined);
+    }
   }
 
   const capabilities: Capabilities = useMemo(() => {
@@ -262,6 +302,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function login(identifier: string, password: string): Promise<CurrentUser> {
     const r = await api.post('/auth/login', { identifier: identifier.trim(), password });
+    await setTokens(r.data.accessToken, r.data.refreshToken);
+    applyUser(r.data.user);
+    return r.data.user as CurrentUser;
+  }
+
+  async function registerBuilding(payload: RegisterBuildingPayload): Promise<CurrentUser> {
+    const r = await api.post('/auth/register-building', payload);
     await setTokens(r.data.accessToken, r.data.refreshToken);
     applyUser(r.data.user);
     return r.data.user as CurrentUser;
@@ -355,6 +402,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         building,
         loading,
         login,
+        registerBuilding,
         loginWithBiometric,
         loginWithRefreshToken,
         enableBiometric,

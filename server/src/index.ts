@@ -20,6 +20,11 @@ async function bootstrap(): Promise<void> {
   const app = express();
 
   app.set('trust proxy', 1);
+  // No conditional GETs for the API: iOS URLSession replays requests with
+  // If-None-Match, Express answers 304 with an empty body, and axios (which
+  // only accepts 2xx) treats that as an error — lists silently render empty
+  // in the app. Always send fresh 200s instead.
+  app.set('etag', false);
   app.use(helmet());
   app.use(
     cors({

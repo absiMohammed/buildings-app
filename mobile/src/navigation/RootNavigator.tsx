@@ -4,10 +4,13 @@ import { createNativeStackNavigator, type NativeStackNavigationOptions } from '@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useAuth } from '../auth/AuthContext';
 import { RoleGate } from '../auth/RoleGate';
+import { MODULES } from '../auth/capabilities';
 import { palette, type } from '../components/theme';
 import { LoginPage } from '../pages/LoginPage';
 import { ChangePasswordModal } from '../components/ChangePasswordModal';
 import { AcceptInvitePage } from '../pages/AcceptInvitePage';
+import { SignupPage } from '../pages/SignupPage';
+import { PlansPage } from '../pages/PlansPage';
 import { DashboardPage } from '../pages/DashboardPage';
 import { PaymentsPage } from '../pages/PaymentsPage';
 import { ExpensesPage } from '../pages/ExpensesPage';
@@ -102,6 +105,7 @@ function AuthNavigator() {
     <AuthStack.Navigator screenOptions={{ headerShown: false, contentStyle: { backgroundColor: palette.bg } }}>
       <AuthStack.Screen name="Login" component={LoginPage} />
       <AuthStack.Screen name="AcceptInvite" component={AcceptInvitePage} />
+      <AuthStack.Screen name="Signup" component={SignupPage} />
     </AuthStack.Navigator>
   );
 }
@@ -112,6 +116,7 @@ function HomeStackScreen() {
     <HomeStack.Navigator screenOptions={commonStackOptions}>
       <HomeStack.Screen name="Dashboard" component={DashboardPage} options={{ headerShown: false }} />
       <HomeStack.Screen name="Settings" component={SettingsPage} options={{ title: t('nav_settings') }} />
+      <HomeStack.Screen name="Plans" component={PlansPage} options={{ title: t('plans_title') }} />
     </HomeStack.Navigator>
   );
 }
@@ -165,9 +170,11 @@ function UnitsStackScreen() {
   const t = useT();
   return (
     <UnitsStack.Navigator screenOptions={commonStackOptions}>
+      {/* Module-gated (not admin-gated): plain owners also get the Units
+          surface — the server scopes it to the units they hold. */}
       <UnitsStack.Screen name="Units" options={{ title: t('nav_units') }}>
         {() => (
-          <RoleGate requireBuildingAdmin>
+          <RoleGate module={MODULES.UNITS}>
             <UnitsPage />
           </RoleGate>
         )}
@@ -179,7 +186,7 @@ function UnitsStackScreen() {
         })}
       >
         {() => (
-          <RoleGate requireBuildingAdmin>
+          <RoleGate module={MODULES.UNITS}>
             <UnitDetailPage />
           </RoleGate>
         )}
@@ -192,9 +199,11 @@ function UsersStackScreen() {
   const t = useT();
   return (
     <UsersStack.Navigator screenOptions={commonStackOptions}>
+      {/* Module-gated: plain owners see the tenants/dependents of their own
+          units; building admins see the whole roster. */}
       <UsersStack.Screen name="Users" options={{ title: t('nav_users') }}>
         {() => (
-          <RoleGate requireBuildingAdmin>
+          <RoleGate module={MODULES.USERS}>
             <UsersPage />
           </RoleGate>
         )}
@@ -353,7 +362,7 @@ function AppNavigator() {
 }
 
 export function RootNavigator() {
-  const { user, loading } = useAuth();
+  const { user, building, loading } = useAuth();
   const t = useT();
 
   if (loading) {
@@ -365,9 +374,15 @@ export function RootNavigator() {
     );
   }
 
+  // Billing lock: a suspended building replaces the whole app with the
+  // plans paywall. The building admin can subscribe from there (the server
+  // keeps /me + /plans open for them); everyone else sees the locked state
+  // until the admin reactivates.
+  const suspendedLock = !!user && user.role !== 'admin' && building?.status === 'suspended';
+
   return (
     <NavigationContainer>
-      {user ? <AppNavigator /> : <AuthNavigator />}
+      {user ? (suspendedLock ? <PlansPage /> : <AppNavigator />) : <AuthNavigator />}
       {/* First login after an admin create/reset: force a password change. */}
       {user?.mustChangePassword ? <ChangePasswordModal open forced /> : null}
     </NavigationContainer>

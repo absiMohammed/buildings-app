@@ -23,6 +23,25 @@ export const refreshSchema = z.object({
   refreshToken: z.string().min(10),
 });
 
+// Self-service signup: founder account + their building + their apartment.
+export const registerBuildingSchema = z.object({
+  firstName: z.string().min(1).max(80),
+  lastName: z.string().min(1).max(80),
+  phone: z.string().min(6).max(40),
+  email: z.string().email().optional(),
+  password: z.string().min(8).max(128),
+  building: z.object({
+    name: z.string().min(2).max(120),
+    address: z.string().max(300).optional(),
+    currency: z.string().min(2).max(6).optional(),
+    stories: z.number().int().min(1).max(200),
+  }),
+  apartment: z.object({
+    number: z.string().min(1).max(20),
+    floor: z.number().int().min(0).max(200).optional(),
+  }),
+});
+
 export const inviteSchema = z
   .object({
     email: z.string().email().optional(),

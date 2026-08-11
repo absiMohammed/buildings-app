@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Linking, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { formatPhone, ltrPhone, palette, spacing, type } from '../components/theme';
 import { Avatar, Card, EmptyState, Pill, PhoneText } from '../components/ui';
 import {
@@ -13,7 +13,15 @@ import {
   type FilterValue,
 } from '../components/ListChrome';
 import { BottomSheet } from '../components/BottomSheet';
-import { listUsers, setUserStatus, setUserRole, setBuildingAdmin, type BuildingUser } from '../api/users';
+import {
+  listUsers,
+  setUserStatus,
+  setUserRole,
+  setBuildingAdmin,
+  getUserLoginLink,
+  resetUserPassword,
+  type BuildingUser,
+} from '../api/users';
 import { listUnits } from '../api/units';
 import { useApiResource } from '../api/useApiResource';
 import type { Role } from '../auth/AuthContext';
@@ -21,7 +29,7 @@ import { useAuth } from '../auth/AuthContext';
 import { ACTIONS, hasAction } from '../auth/capabilities';
 import { InviteModal } from '../components/InviteModal';
 import { UserSettingsModal } from '../components/UserSettingsModal';
-import { EditUserModal } from '../components/EditUserModal';
+import { CreateUserModal } from '../components/CreateUserModal';
 import { useConfirm } from '../components/ConfirmProvider';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
@@ -58,10 +66,20 @@ const BUILDING_ROLES: Role[] = ['owner', 'renter', 'dependent', 'independent'];
 const STATUSES: BuildingUser['status'][] = ['active', 'invited', 'suspended'];
 
 export function UsersPage() {
-  const { user, capabilities: caps } = useAuth();
+  const { user, building, capabilities: caps } = useAuth();
   const canInvite = hasAction(caps, ACTIONS.USER_INVITE);
   const canManage = hasAction(caps, ACTIONS.USER_MANAGE);
   const canPromote = hasAction(caps, ACTIONS.USER_PROMOTE);
+  // Owner-scoped management: renters/dependents of the caller's own units.
+  // The server already limits the roster to exactly those users for plain
+  // owners, so here it only excludes rows an owner may never touch.
+  const canManageTenants = hasAction(caps, ACTIONS.TENANT_MANAGE);
+  const manageable = useCallback(
+    (u: BuildingUser): boolean =>
+      canManage ||
+      (canManageTenants && (u.role === 'renter' || u.role === 'dependent') && !u.isBuildingAdmin),
+    [canManage, canManageTenants],
+  );
   const { t, tf } = useI18n();
   const { confirm } = useConfirm();
 
@@ -159,8 +177,38 @@ export function UsersPage() {
   }
 
   function openActions(target: BuildingUser) {
-    if (!canManage && !canPromote) return;
+    if (!manageable(target) && !canPromote) return;
     setActionTarget(target);
+  }
+
+  async function sendLogin(target: BuildingUser) {
+    setActionTarget(null);
+    try {
+      const r = await getUserLoginLink(target._id);
+      if (r.whatsappUrl) await Linking.openURL(r.whatsappUrl);
+    } catch (e) {
+      const msg = (e as { response?: { data?: { error?: { message?: string } } } })
+        ?.response?.data?.error?.message;
+      await confirm({ title: t('users_err_save'), message: msg ?? '', confirmLabel: t('done') });
+    }
+  }
+
+  async function resendCredentials(target: BuildingUser) {
+    const ok = await confirm({
+      title: t('users_resend_confirm_title'),
+      message: t('users_resend_confirm_body'),
+      confirmLabel: t('users_resend_confirm_ok'),
+      cancelLabel: t('cancel'),
+    });
+    if (!ok) return;
+    try {
+      const r = await resetUserPassword(target._id);
+      if (r.whatsappUrl) await Linking.openURL(r.whatsappUrl);
+    } catch (e) {
+      const msg = (e as { response?: { data?: { error?: { message?: string } } } })
+        ?.response?.data?.error?.message;
+      await confirm({ title: t('users_err_save'), message: msg ?? '', confirmLabel: t('done') });
+    }
   }
 
   async function toggleStatus(target: BuildingUser) {
@@ -254,7 +302,7 @@ export function UsersPage() {
             return (
               <View key={u._id}>
                 <TouchableOpacity
-                  activeOpacity={canManage || canPromote ? 0.85 : 1}
+                  activeOpacity={manageable(u) || canPromote ? 0.85 : 1}
                   onPress={() => openActions(u)}
                   style={styles.row}
                 >
@@ -379,7 +427,31 @@ export function UsersPage() {
               />
             )}
 
-            {canManage && (
+            {manageable(actionTarget) && (
+              <SheetMenuItem
+                icon="message"
+                label={t('users_action_send_login')}
+                onPress={() => {
+                  const target = actionTarget;
+                  setPendingAction(() => () => void sendLogin(target));
+                  setActionTarget(null);
+                }}
+              />
+            )}
+
+            {manageable(actionTarget) && (
+              <SheetMenuItem
+                icon="key"
+                label={t('users_action_resend')}
+                onPress={() => {
+                  const target = actionTarget;
+                  setPendingAction(() => () => void resendCredentials(target));
+                  setActionTarget(null);
+                }}
+              />
+            )}
+
+            {manageable(actionTarget) && (
               <SheetMenuItem
                 icon="power"
                 label={
@@ -415,11 +487,15 @@ export function UsersPage() {
         doneLabel={t('filter_done')}
       />
 
+      {/* Plain owners only add renters/dependents, and only into units they
+          own (the server enforces the same). Building admins keep the full
+          role set and every unit. */}
       <InviteModal
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
         defaultRole="renter"
-        units={units.map((u) => ({
+        allowedRoles={canManage ? ['owner', 'renter', 'dependent'] : ['renter', 'dependent']}
+        units={(canManage ? units : units.filter((u) => u.ownerId === user?._id)).map((u) => ({
           _id: u._id,
           number: u.number,
           hasOwner: !!u.ownerId,
@@ -438,13 +514,33 @@ export function UsersPage() {
         initial={null}
       />
 
-      <EditUserModal
+      {/* Full editor — same form as adding a user (name, phone, role,
+          units, building-admin flag), locked to this building. */}
+      <CreateUserModal
         open={!!editTarget}
-        userId={editTarget?._id ?? ''}
-        initialFirstName={editTarget?.firstName ?? ''}
-        initialLastName={editTarget?.lastName ?? ''}
+        building={building ? { _id: building._id, name: building.name } : undefined}
+        editUser={
+          editTarget && building
+            ? {
+                _id: editTarget._id,
+                firstName: editTarget.firstName,
+                lastName: editTarget.lastName,
+                phone: editTarget.phone,
+                memberships: (editTarget.roles ?? [
+                  { role: editTarget.role, unitIds: editTarget.unitIds ?? [] },
+                ])
+                  .filter((r) => r.role !== 'admin')
+                  .map((r) => ({
+                    buildingId: building._id,
+                    role: r.role as 'owner' | 'renter' | 'dependent' | 'independent',
+                    unitIds: r.unitIds,
+                    isBuildingAdmin: editTarget.isBuildingAdmin,
+                  })),
+              }
+            : undefined
+        }
         onClose={() => setEditTarget(null)}
-        onSaved={() => {
+        onCreated={() => {
           setEditTarget(null);
           void reload();
         }}

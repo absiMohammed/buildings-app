@@ -127,7 +127,7 @@ export function StatCard({
       />
       <View style={[statStyles.toneStripe, { backgroundColor: toneStyle.stripe }]} />
       <View style={[statStyles.iconBubble, { backgroundColor: toneStyle.bubble }]}>
-        <Text style={[statStyles.iconText, { color: toneStyle.stripe }]}>{toneStyle.glyph}</Text>
+        <Icon name={toneStyle.icon} size={15} color={toneStyle.stripe} strokeWidth={2.6} />
       </View>
       <Text style={[type.caption, { color: toneStyle.label }]}>{label}</Text>
       <Text style={[type.title, statStyles.value]}>{value}</Text>
@@ -136,12 +136,12 @@ export function StatCard({
   );
 }
 
-const statToneStyles: Record<string, { stripe: string; hint: string; gradStart: string; gradEnd: string; bubble: string; glyph: string; label: string }> = {
-  neutral: { stripe: palette.textSubtle, hint: palette.textSubtle, gradStart: '#ffffff', gradEnd: '#f6f8fb', bubble: '#eef2f6', glyph: '●', label: palette.textSubtle },
-  positive: { stripe: palette.success, hint: palette.success, gradStart: '#ffffff', gradEnd: '#ecfdf5', bubble: '#d1fae5', glyph: I18nManager.isRTL ? '↖' : '↗', label: palette.textSubtle },
-  warning: { stripe: palette.warning, hint: palette.warning, gradStart: '#ffffff', gradEnd: '#fffbeb', bubble: '#fde68a', glyph: '!', label: palette.textSubtle },
-  danger: { stripe: palette.danger, hint: palette.danger, gradStart: '#ffffff', gradEnd: '#fef2f2', bubble: '#fecaca', glyph: '!', label: palette.textSubtle },
-  accent: { stripe: palette.accent, hint: palette.accent, gradStart: '#ffffff', gradEnd: '#eef2ff', bubble: '#e0e7ff', glyph: '★', label: palette.textSubtle },
+const statToneStyles: Record<string, { stripe: string; hint: string; gradStart: string; gradEnd: string; bubble: string; icon: IconName; label: string }> = {
+  neutral: { stripe: palette.textSubtle, hint: palette.textSubtle, gradStart: '#ffffff', gradEnd: '#f6f8fb', bubble: '#eef2f6', icon: 'sparkles', label: palette.textSubtle },
+  positive: { stripe: palette.success, hint: palette.success, gradStart: '#ffffff', gradEnd: '#ecfdf5', bubble: '#d1fae5', icon: 'trend', label: palette.textSubtle },
+  warning: { stripe: palette.warning, hint: palette.warning, gradStart: '#ffffff', gradEnd: '#fffbeb', bubble: '#fde68a', icon: 'warning', label: palette.textSubtle },
+  danger: { stripe: palette.danger, hint: palette.danger, gradStart: '#ffffff', gradEnd: '#fef2f2', bubble: '#fecaca', icon: 'warning', label: palette.textSubtle },
+  accent: { stripe: palette.accent, hint: palette.accent, gradStart: '#ffffff', gradEnd: '#eef2ff', bubble: '#e0e7ff', icon: 'star', label: palette.textSubtle },
 };
 
 const statStyles = StyleSheet.create({

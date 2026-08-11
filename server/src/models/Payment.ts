@@ -1,6 +1,8 @@
 import { Schema, model, type InferSchemaType, type HydratedDocument } from 'mongoose';
 
-const TYPES = ['monthly_dues', 'expense_split', 'one_off'] as const;
+// 'rent' charges are owner-managed: created/settled by the unit's owner,
+// billed to the renter — unlike the rest, which are building-admin managed.
+const TYPES = ['monthly_dues', 'expense_split', 'one_off', 'rent'] as const;
 const STATUSES = ['pending', 'paid', 'overdue', 'waived'] as const;
 const METHODS = ['cash', 'transfer', 'stripe', 'other'] as const;
 

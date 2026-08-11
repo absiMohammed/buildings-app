@@ -2,6 +2,12 @@ import { Types } from 'mongoose';
 import { User, type UserDoc, membershipFor, membershipsForBuilding, primaryMembership } from '../models/User.js';
 import { InviteToken } from '../models/InviteToken.js';
 import { Unit } from '../models/Unit.js';
+import { Building } from '../models/Building.js';
+import {
+  TRIAL_DAYS,
+  assertPlanAllowsNewUser,
+  assertPlanAllowsNewDependent,
+} from './plans.service.js';
 import {
   hashPassword,
   verifyPassword,
@@ -38,13 +44,20 @@ export function tokenPayload(user: UserDoc, activeBuildingId?: string | null): A
   if (user.systemRole === 'admin') {
     return { sub, role: 'admin', buildingId: null, unitId: null, isBuildingAdmin: false };
   }
-  const m = primaryMembership(user, activeBuildingId ?? user.memberships[0]?.buildingId);
+  const bid = activeBuildingId ?? user.memberships[0]?.buildingId;
+  const m = primaryMembership(user, bid);
   if (!m) throw Forbidden('This account is not attached to any building.');
+  // A user can hold several units in one building across memberships
+  // (owner of 1A, tenant of 2B). Unit-scoped routes filter by the union.
+  const unitIds = membershipsForBuilding(user, bid).flatMap((mm) =>
+    (mm.unitIds ?? []).map((u) => String(u)),
+  );
   return {
     sub,
     role: m.role,
     buildingId: String(m.buildingId),
     unitId: m.unitIds?.[0] ? String(m.unitIds[0]) : null,
+    unitIds,
     isBuildingAdmin: !!m.isBuildingAdmin,
   };
 }
@@ -182,6 +195,18 @@ export interface CreateInviteResult {
 export async function createInvite(args: CreateInviteArgs): Promise<CreateInviteResult> {
   const phone = args.phone ? normalizePhone(args.phone) : null;
   if (!phone) throw BadRequest('phone is required');
+  // Subscription tiers cap the building's member count; trial is unlimited.
+  await assertPlanAllowsNewUser(String(args.buildingId));
+  // Dependents are additionally capped PER UNIT by the plan tier (basic:
+  // none, pro: 1, premium: unlimited).
+  if (args.role === 'dependent') {
+    for (const uid of args.unitIds ?? []) {
+      await assertPlanAllowsNewDependent(String(args.buildingId), String(uid));
+    }
+    if (args.unitId) {
+      await assertPlanAllowsNewDependent(String(args.buildingId), String(args.unitId));
+    }
+  }
   const email = args.email?.toLowerCase().trim() || null;
 
   // Gather the requested units. 'independent' (guard/staff) and building-admin
@@ -508,4 +533,103 @@ export async function acceptInvite(rawToken: string, password: string, names: { 
   const refreshToken = signRefreshToken({ sub: user._id.toString(), jti: user.refreshTokenHash });
 
   return { user, accessToken, refreshToken };
+}
+
+// ---------------------------------------------------------------------------
+// Self-service signup: create a building + the founder's apartment + their
+// account in one shot. The founder becomes an owner flagged as building
+// admin, and the building starts a 1-month all-features trial (see
+// plans.service.ts). The daily cron suspends the building when the trial
+// lapses without a paid plan.
+// ---------------------------------------------------------------------------
+
+export interface RegisterBuildingArgs {
+  firstName: string;
+  lastName: string;
+  phone: string;
+  email?: string;
+  password: string;
+  building: { name: string; address?: string; currency?: string; stories: number };
+  apartment: { number: string; floor?: number };
+}
+
+export async function registerBuilding(args: RegisterBuildingArgs) {
+  const phone = normalizePhone(args.phone);
+  if (phone.replace(/\D/g, '').length < 6) throw BadRequest('A valid phone number is required');
+  const email = args.email?.toLowerCase().trim() || null;
+
+  if (await User.findOne({ phone })) {
+    throw Conflict('An account with this phone already exists.');
+  }
+  if (email && (await User.findOne({ email }))) {
+    throw Conflict('An account with this email already exists.');
+  }
+
+  const trialEndsAt = new Date(Date.now() + TRIAL_DAYS * 86_400_000);
+  const building = await Building.create({
+    name: args.building.name,
+    address: args.building.address ?? '',
+    currency: args.building.currency ?? 'ILS',
+    stories: args.building.stories,
+    // Active from day one — unlike system-admin-created buildings, the
+    // founder IS the building admin, so the "needs admin" gate is met.
+    status: 'active',
+    subscription: {
+      plan: 'trial',
+      status: 'trial',
+      trialEndsAt,
+      currentPeriodEnd: null,
+    },
+  });
+
+  const unit = await Unit.create({
+    buildingId: building._id,
+    number: args.apartment.number,
+    ...(args.apartment.floor !== undefined ? { floor: args.apartment.floor } : {}),
+  });
+
+  const passwordHash = await hashPassword(args.password);
+  let user;
+  try {
+    user = await User.create({
+      phone,
+      email,
+      passwordHash,
+      firstName: args.firstName,
+      lastName: args.lastName,
+      systemRole: 'member',
+      status: 'active',
+      memberships: [
+        {
+          buildingId: building._id,
+          role: 'owner',
+          unitIds: [unit._id],
+          isBuildingAdmin: true,
+          linkedOwnerId: null,
+        },
+      ],
+    });
+  } catch (err) {
+    // Signup is all-or-nothing: if the account can't be created (e.g. a
+    // unique-index race), don't leave an orphaned building+unit behind.
+    await Promise.allSettled([
+      Unit.deleteOne({ _id: unit._id }),
+      Building.deleteOne({ _id: building._id }),
+    ]);
+    throw err;
+  }
+
+  unit.ownerId = user._id;
+  unit.occupants = [user._id];
+  await unit.save();
+
+  // Issue a session immediately — same shape as loginWithPassword.
+  const accessToken = signAccessToken(tokenPayload(user));
+  const refreshRaw = randomToken(48);
+  user.refreshTokenHash = sha256(refreshRaw);
+  user.lastLoginAt = new Date();
+  await user.save();
+  const refreshToken = signRefreshToken({ sub: user._id.toString(), jti: user.refreshTokenHash });
+
+  return { user, building, accessToken, refreshToken };
 }

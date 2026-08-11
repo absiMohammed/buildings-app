@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 import {
+  I18nManager,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -246,13 +247,23 @@ function PollCard({
                         {chosen ? (
                           <Icon name="check" size={16} color={palette.accent} />
                         ) : null}
-                        {isClosed && tallies && (
-                          <Text style={styles.tallyValue}>{count} ({pct}%)</Text>
-                        )}
+                        {tallies && <Text style={styles.tallyPct}>{pct}%</Text>}
                       </View>
-                      {isClosed && tallies && (
-                        <View style={{ marginTop: 4 }}>
-                          <ProgressBar value={count} max={Math.max(totalVotes, 1)} tone="accent" />
+                      {/* Result bar + share — the server returns tallies once
+                          the viewer may see them (closed, admin, or already
+                          voted), so presence of tallies is the only gate. */}
+                      {tallies && (
+                        <View style={styles.tallyRow}>
+                          <View style={styles.tallyBar}>
+                            <ProgressBar
+                              value={count}
+                              max={Math.max(totalVotes, 1)}
+                              tone={chosen ? 'positive' : 'accent'}
+                            />
+                          </View>
+                          <Text style={styles.tallyValue}>
+                            {tf('polls_votes_count', { count })}
+                          </Text>
                         </View>
                       )}
                     </TouchableOpacity>
@@ -260,7 +271,7 @@ function PollCard({
                 })}
               </View>
 
-              {isClosed && tallies && (
+              {tallies && (
                 <Text style={[type.small, { marginTop: spacing.md }]}>
                   {totalVotes === 1 ? t('polls_votes_one') : tf('polls_votes_many', { count: totalVotes })}
                 </Text>
@@ -306,7 +317,17 @@ const styles = StyleSheet.create({
   optionRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   optionLabel: { flex: 1, color: palette.text, fontSize: 14, fontWeight: '500' },
   optionLabelActive: { color: palette.accent, fontWeight: '700' },
-  tallyValue: { color: palette.text, fontSize: 13, fontWeight: '600', marginStart: spacing.sm },
+  tallyPct: { color: palette.accent, fontSize: 14, fontWeight: '800', marginStart: spacing.sm },
+  tallyRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: 8 },
+  tallyBar: { flex: 1 },
+  // The count caps the row's logical end; align its digits toward the bar.
+  tallyValue: {
+    color: palette.textSubtle,
+    fontSize: 12,
+    fontWeight: '600',
+    minWidth: 56,
+    textAlign: I18nManager.isRTL ? 'left' : 'right',
+  },
   readonlyBanner: {
     marginBottom: spacing.md,
     padding: spacing.md,

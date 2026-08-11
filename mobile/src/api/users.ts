@@ -14,6 +14,10 @@ export interface BuildingUser {
   unitId: string | null;
   linkedOwnerId: string | null;
   isBuildingAdmin: boolean;
+  /** Union of the user's units in this building (may span several roles). */
+  unitIds?: string[];
+  /** Per-role breakdown for this building (e.g. owner:[1A], renter:[2B]). */
+  roles?: { role: Role; unitIds: string[] }[];
   status: UserStatus;
   lastLoginAt: string | null;
   createdAt: string;

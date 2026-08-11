@@ -1,6 +1,6 @@
 import { api } from './client';
 
-export type PaymentType = 'monthly_dues' | 'expense_split' | 'one_off';
+export type PaymentType = 'monthly_dues' | 'expense_split' | 'one_off' | 'rent';
 export type PaymentStatus = 'pending' | 'paid' | 'overdue' | 'waived';
 export type PaymentMethod = 'cash' | 'transfer' | 'stripe' | 'other';
 

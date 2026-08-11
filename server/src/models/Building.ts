@@ -1,12 +1,38 @@
 import { Schema, model, type InferSchemaType, type HydratedDocument } from 'mongoose';
 
-const STATUSES = ['active', 'inactive'] as const;
+// 'suspended' is the billing-driven variant of 'inactive': set automatically
+// when a trial or paid period lapses. Residents are locked out exactly like
+// 'inactive'; the building admin keeps access to the paywall so they can
+// subscribe and reactivate.
+const STATUSES = ['active', 'inactive', 'suspended'] as const;
+
+const SUBSCRIPTION_PLANS = ['trial', 'basic', 'pro', 'premium'] as const;
+const SUBSCRIPTION_STATUSES = ['trial', 'active', 'suspended', 'none'] as const;
 
 const BuildingSchema = new Schema(
   {
     name: { type: String, required: true, trim: true },
     address: { type: String, default: '' },
     currency: { type: String, default: 'ILS' },
+    // Number of floors/stories — captured at self-service signup and gated
+    // by the subscription plan's `maxStories` limit.
+    stories: { type: Number, default: 1, min: 1 },
+    // SaaS billing state. New self-service buildings start on a 1-month
+    // all-features trial; the daily cron suspends the building when the
+    // trial (or a paid period) lapses without an active plan.
+    subscription: {
+      plan: { type: String, enum: SUBSCRIPTION_PLANS, default: 'trial' },
+      status: { type: String, enum: SUBSCRIPTION_STATUSES, default: 'none' },
+      trialEndsAt: { type: Date, default: null },
+      currentPeriodEnd: { type: Date, default: null },
+      // In-app purchase receipt breadcrumbs (StoreKit / Play Billing).
+      iap: {
+        platform: { type: String, enum: ['ios', 'android', 'manual'], default: null },
+        productId: { type: String, default: '' },
+        transactionId: { type: String, default: '' },
+        lastPurchaseAt: { type: Date, default: null },
+      },
+    },
     // Admin can deactivate a building without deleting it — residents lose
     // access immediately but historical data (payments, expenses, polls)
     // stays intact for audit. Re-activating is reversible.
@@ -67,6 +93,9 @@ const BuildingSchema = new Schema(
 );
 
 export const BUILDING_STATUSES = STATUSES;
+export const BUILDING_SUBSCRIPTION_PLANS = SUBSCRIPTION_PLANS;
+export const BUILDING_SUBSCRIPTION_STATUSES = SUBSCRIPTION_STATUSES;
+export type SubscriptionPlanId = (typeof SUBSCRIPTION_PLANS)[number];
 
 export type BuildingType = InferSchemaType<typeof BuildingSchema>;
 export type BuildingDoc = HydratedDocument<BuildingType>;

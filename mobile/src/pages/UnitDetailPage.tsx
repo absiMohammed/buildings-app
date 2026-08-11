@@ -17,7 +17,7 @@ import { type IconName } from '../components/Icon';
 import { palette, radii, shadow, spacing, type, textStart } from '../components/theme';
 import { fmtMoney, fmtMoneyCompact, relativeDay } from '../utils/format';
 import { listUnits, updateUnit, type Unit } from '../api/units';
-import { listPayments, updatePayment, type Payment } from '../api/payments';
+import { createPayment, listPayments, updatePayment, type Payment } from '../api/payments';
 import { useApiResource } from '../api/useApiResource';
 import { RecordPaymentModal } from '../components/RecordPaymentModal';
 import { BottomSheet } from '../components/BottomSheet';
@@ -32,6 +32,7 @@ interface UnitDetailData {
 // Reuse the existing dues label where it maps; otherwise prettify the raw type.
 function paymentTypeLabel(pt: Payment['type'], t: ReturnType<typeof useI18n>['t']): string {
   if (pt === 'monthly_dues') return t('ptype_building_dues');
+  if (pt === 'rent') return t('ptype_rent');
   return pt
     .split('_')
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
@@ -46,6 +47,8 @@ function paymentIcon(pt: Payment['type']): IconName {
       return 'expenses';
     case 'one_off':
       return 'payments';
+    case 'rent':
+      return 'home';
   }
 }
 
@@ -87,12 +90,15 @@ export function UnitDetailPage() {
   const route = useRoute<RouteProp<AppStackParamList, 'UnitDetail'>>();
   const navigation = useNavigation();
   const currency = useCurrency();
-  const { building, capabilities: caps } = useAuth();
+  const { building, capabilities: caps, user } = useAuth();
   const canUpdate = hasAction(caps, ACTIONS.UNIT_UPDATE);
   const canMarkPaid = hasAction(caps, ACTIONS.PAYMENT_MARK_PAID);
+  const canManageRent = hasAction(caps, ACTIONS.RENT_MANAGE);
   const unitNumber = route.params?.unitNumber;
   const [duesModalOpen, setDuesModalOpen] = useState(false);
   const [recordOpen, setRecordOpen] = useState(false);
+  const [rentModalOpen, setRentModalOpen] = useState(false);
+  const [rentChargeOpen, setRentChargeOpen] = useState(false);
   const buildingDuesDay = building?.settings?.monthlyDuesDay ?? 1;
   const buildingDefaultAmount = building?.settings?.defaultMonthlyDues ?? 0;
   const { t, tf } = useI18n();
@@ -121,6 +127,26 @@ export function UnitDetailPage() {
       await updatePayment(id, { status: 'paid', paymentMethod: 'cash' });
     }
     setRecordOpen(false);
+    await reload();
+  }
+
+  async function saveRent(amount: number | null) {
+    if (!unit) return;
+    await updateUnit(unit._id, { monthlyRentAmount: amount });
+    setRentModalOpen(false);
+    await reload();
+  }
+
+  async function addRentCharge(input: { amount: number; dueDate: string }) {
+    if (!unit) return;
+    await createPayment({
+      unitId: unit._id,
+      type: 'rent',
+      amount: input.amount,
+      currency,
+      dueDate: input.dueDate,
+    });
+    setRentChargeOpen(false);
     await reload();
   }
 
@@ -165,6 +191,13 @@ export function UnitDetailPage() {
   const paidTotal = payments.filter((p) => p.status === 'paid').reduce((s, p) => s + p.amount, 0);
   const occupied = unit.occupants.length > 0;
   const openPayments = payments.filter((p) => p.status === 'pending' || p.status === 'overdue');
+  // Rent is the OWNER's surface: only the unit's owner sets the amount,
+  // creates charges, and records their renter's payments.
+  const rentEditable = canManageRent && unit.ownerId === user?._id;
+  const openRentPayments = openPayments.filter((p) => p.type === 'rent');
+  // A building admin records any open charge; a plain owner only their
+  // unit's rent charges.
+  const recordablePayments = canMarkPaid ? openPayments : rentEditable ? openRentPayments : [];
   const chartData = history.map((m) => ({
     value: m.amount,
     label: m.label,
@@ -200,7 +233,7 @@ export function UnitDetailPage() {
         <StatTile label={t('unit_stat_paid_ytd')} value={fmtMoneyCompact(paidTotal, currency)} tone="positive" />
       </View>
 
-      {canMarkPaid && openPayments.length > 0 && (
+      {recordablePayments.length > 0 && (
         <View style={styles.cta}>
           <Button label={t('unit_record_payment')} variant="primary" onPress={() => setRecordOpen(true)} />
         </View>
@@ -232,6 +265,36 @@ export function UnitDetailPage() {
           )}
         </View>
       </Card>
+
+      {/* Rent — owner-managed. Admins see the amount read-only. */}
+      {(rentEditable || unit.monthlyRentAmount != null) && (
+        <Card style={{ marginBottom: spacing.md }}>
+          <View style={styles.duesRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={type.caption}>{t('unit_rent_caps')}</Text>
+              <Text style={[type.heading, { marginTop: 4 }]}>
+                {unit.monthlyRentAmount != null
+                  ? tf('unit_rent_summary', { amount: fmtMoney(unit.monthlyRentAmount, currency) })
+                  : t('unit_rent_not_set')}
+              </Text>
+              <Text style={type.small}>
+                {unit.monthlyRentAmount != null ? t('unit_rent_billing_note') : t('unit_rent_not_set_note')}
+              </Text>
+            </View>
+            {rentEditable && (
+              <Button label={t('edit')} variant="secondary" onPress={() => setRentModalOpen(true)} style={{ paddingHorizontal: 16 }} />
+            )}
+          </View>
+          {rentEditable && (
+            <Button
+              label={t('unit_rent_add_charge')}
+              variant="primary"
+              onPress={() => setRentChargeOpen(true)}
+              style={{ marginTop: spacing.md }}
+            />
+          )}
+        </Card>
+      )}
 
       {/* Chart */}
       <SectionHeader title={t('unit_chart_6mo')} />
@@ -331,8 +394,22 @@ export function UnitDetailPage() {
         onClose={() => setRecordOpen(false)}
         unitNumber={unit.number}
         currency={currency}
-        openPayments={openPayments}
+        openPayments={recordablePayments}
         onSubmit={({ selectedIds }) => void markSelectedPaid(selectedIds)}
+      />
+
+      <EditRentModal
+        open={rentModalOpen}
+        onClose={() => setRentModalOpen(false)}
+        currentAmount={unit.monthlyRentAmount}
+        onSave={(amount) => void saveRent(amount)}
+      />
+
+      <AddRentChargeModal
+        open={rentChargeOpen}
+        onClose={() => setRentChargeOpen(false)}
+        defaultAmount={unit.monthlyRentAmount}
+        onSubmit={(input) => void addRentCharge(input)}
       />
 
       <EditDuesModal
@@ -346,6 +423,131 @@ export function UnitDetailPage() {
         onSave={saveDues}
       />
     </ScrollView>
+  );
+}
+
+function EditRentModal({
+  open,
+  onClose,
+  currentAmount,
+  onSave,
+}: {
+  open: boolean;
+  onClose: () => void;
+  currentAmount: number | null;
+  onSave: (amount: number | null) => void;
+}) {
+  const { t } = useI18n();
+  const [amount, setAmount] = useState(currentAmount != null ? String(currentAmount) : '');
+
+  useEffect(() => {
+    if (open) setAmount(currentAmount != null ? String(currentAmount) : '');
+  }, [open, currentAmount]);
+
+  const trimmed = amount.trim();
+  const amountN = trimmed ? parseFloat(trimmed.replace(/,/g, '')) : null;
+  const valid = amountN === null || (Number.isFinite(amountN) && amountN >= 0);
+
+  return (
+    <BottomSheet open={open} onClose={onClose}>
+      <View>
+        <Text style={[type.title, { marginBottom: spacing.sm }]}>{t('rent_edit_title')}</Text>
+        <Text style={[type.small, { marginBottom: spacing.md }]}>{t('rent_edit_body')}</Text>
+
+        <Text style={modalStyles.label}>{t('rent_amount_label')}</Text>
+        <TextInput
+          value={amount}
+          onChangeText={setAmount}
+          keyboardType="decimal-pad"
+          placeholder="0.00"
+          placeholderTextColor={palette.textSubtle}
+          style={modalStyles.input}
+        />
+        <Text style={[type.small, { marginTop: 4, color: palette.textSubtle }]}>{t('rent_clear_hint')}</Text>
+
+        <View style={modalStyles.actions}>
+          <Button label={t('cancel')} variant="secondary" onPress={onClose} style={{ flex: 1 }} />
+          <Button label={t('save')} onPress={() => onSave(amountN)} disabled={!valid} style={{ flex: 1 }} />
+        </View>
+      </View>
+    </BottomSheet>
+  );
+}
+
+function AddRentChargeModal({
+  open,
+  onClose,
+  defaultAmount,
+  onSubmit,
+}: {
+  open: boolean;
+  onClose: () => void;
+  defaultAmount: number | null;
+  onSubmit: (input: { amount: number; dueDate: string }) => void;
+}) {
+  const { t } = useI18n();
+  const [amount, setAmount] = useState(defaultAmount != null ? String(defaultAmount) : '');
+  const [daysFromNow, setDaysFromNow] = useState('7');
+
+  useEffect(() => {
+    if (open) {
+      setAmount(defaultAmount != null ? String(defaultAmount) : '');
+      setDaysFromNow('7');
+    }
+  }, [open, defaultAmount]);
+
+  const amountN = parseFloat(amount.replace(/,/g, ''));
+  const daysN = parseInt(daysFromNow, 10);
+  const valid =
+    Number.isFinite(amountN) && amountN > 0 && Number.isFinite(daysN) && daysN >= 0 && daysN <= 365;
+
+  return (
+    <BottomSheet open={open} onClose={onClose}>
+      <View>
+        <Text style={[type.title, { marginBottom: spacing.sm }]}>{t('rent_charge_title')}</Text>
+        <Text style={[type.small, { marginBottom: spacing.md }]}>{t('rent_charge_body')}</Text>
+
+        <View style={{ flexDirection: 'row', gap: spacing.md }}>
+          <View style={{ flex: 1 }}>
+            <Text style={modalStyles.label}>{t('rent_amount_label')}</Text>
+            <TextInput
+              value={amount}
+              onChangeText={setAmount}
+              keyboardType="decimal-pad"
+              placeholder="0.00"
+              placeholderTextColor={palette.textSubtle}
+              style={modalStyles.input}
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={modalStyles.label}>{t('new_charge_due_days')}</Text>
+            <TextInput
+              value={daysFromNow}
+              onChangeText={setDaysFromNow}
+              keyboardType="number-pad"
+              placeholder="7"
+              placeholderTextColor={palette.textSubtle}
+              style={modalStyles.input}
+            />
+          </View>
+        </View>
+
+        <View style={modalStyles.actions}>
+          <Button label={t('cancel')} variant="secondary" onPress={onClose} style={{ flex: 1 }} />
+          <Button
+            label={t('rent_charge_add')}
+            onPress={() =>
+              onSubmit({
+                amount: amountN,
+                dueDate: new Date(Date.now() + daysN * 86_400_000).toISOString(),
+              })
+            }
+            disabled={!valid}
+            style={{ flex: 1 }}
+          />
+        </View>
+      </View>
+    </BottomSheet>
   );
 }
 

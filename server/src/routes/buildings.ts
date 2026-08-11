@@ -10,6 +10,7 @@ import { Unit } from '../models/Unit.js';
 import { InviteToken } from '../models/InviteToken.js';
 import { getOrCreatePricing } from '../models/FeaturePricing.js';
 import { computeBuildingSubscription } from '../services/subscription.service.js';
+import { TRIAL_DAYS } from '../services/plans.service.js';
 import { BuildingAction, BUILDING_ACTION_TYPES } from '../models/BuildingAction.js';
 import {
   SubscriptionPayment,
@@ -356,6 +357,14 @@ router.post(
       // New buildings start INACTIVE and can only be activated once a
       // building admin has been assigned (enforced on PATCH /:id/status).
       status: 'inactive',
+      // Every building must hold a subscription: admin-created ones start
+      // on the same 1-month trial as self-service signups.
+      subscription: {
+        plan: 'trial',
+        status: 'trial',
+        trialEndsAt: new Date(Date.now() + TRIAL_DAYS * 86_400_000),
+        currentPeriodEnd: null,
+      },
       settings: {
         timezone: body.timezone ?? 'UTC',
         ...(body.geoCenter ? { geoCenter: body.geoCenter } : {}),

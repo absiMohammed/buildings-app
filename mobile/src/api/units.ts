@@ -9,6 +9,8 @@ export interface Unit {
   bedrooms?: number;
   monthlyDuesAmount: number | null;
   monthlyDuesDayOverride: number | null;
+  /** Rent the owner charges for this unit; null = not set. */
+  monthlyRentAmount: number | null;
   ownerId: string | null;
   occupants: string[];
   notes: string;
@@ -70,7 +72,8 @@ export async function deleteBuildingUnit(buildingId: string, unitId: string): Pr
   await api.delete(`/buildings/${buildingId}/units/${unitId}`);
 }
 
-/** Admin may edit any field; a unit owner may edit only `notes`. */
+/** Admin may edit any field; a unit owner may edit `notes` and
+ *  `monthlyRentAmount` on units they own. */
 export async function updateUnit(
   id: string,
   body: Partial<{
@@ -80,6 +83,7 @@ export async function updateUnit(
     bedrooms: number;
     monthlyDuesAmount: number;
     monthlyDuesDayOverride: number | null;
+    monthlyRentAmount: number | null;
     notes: string;
   }>,
 ): Promise<Unit> {

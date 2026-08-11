@@ -6,6 +6,7 @@ import {
   Text,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { BarChart, LineChart, PieChart } from 'react-native-gifted-charts';
@@ -110,7 +111,7 @@ function buildTrend(payments: Payment[]): { label: string; value: number }[] {
 }
 
 function ResidentDashboard({ role }: { role: Role }) {
-  const { user, logout, capabilities: caps } = useAuth();
+  const { user, building, logout, capabilities: caps, canToggleAdminView } = useAuth();
   const currency = useCurrency();
   const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
   const { t, tf, locale } = useI18n();
@@ -132,7 +133,18 @@ function ResidentDashboard({ role }: { role: Role }) {
 
   const { data, loading, refreshing, error, refresh } = useApiResource(fetcher, 'Could not load your dashboard.');
 
-  const payments = useMemo(() => data?.payments ?? [], [data]);
+  // Building admins receive building-wide payments from the server; in
+  // OWNER view (no mark-paid capability) narrow the stats to their own
+  // unit(s) so the dashboard reads like any other owner's.
+  const canManagePayments = hasAction(caps, ACTIONS.PAYMENT_MARK_PAID);
+  const payments = useMemo(() => {
+    const list = data?.payments ?? [];
+    if (canManagePayments) return list;
+    const mine = new Set(
+      [...(user?.units?.map((u) => u._id) ?? []), user?.unit?._id].filter(Boolean) as string[],
+    );
+    return list.filter((p) => mine.has(p.unitId));
+  }, [data, canManagePayments, user]);
   const units = useMemo(() => data?.units ?? [], [data]);
   const polls = useMemo(() => data?.polls ?? [], [data]);
   const tickets = useMemo(() => data?.tickets ?? [], [data]);
@@ -214,11 +226,17 @@ function ResidentDashboard({ role }: { role: Role }) {
         <View style={styles.heroBlob2} />
 
         <View style={styles.heroTopRow}>
-          <View style={styles.heroPill}>
-            <Text style={styles.heroPillText}>{t(roleKey(role))}</Text>
-          </View>
+          {/* The view switcher already names the role for building admins —
+              a static role pill next to it would contradict the active mode. */}
+          {canToggleAdminView ? (
+            <View />
+          ) : (
+            <View style={styles.heroPill}>
+              <Text style={styles.heroPillText}>{t(roleKey(role))}</Text>
+            </View>
+          )}
           <View style={styles.heroActions}>
-            <ViewModeChip />
+            <ViewModeChip variant="onDark" />
 
             <TouchableOpacity
               style={styles.heroIconBtn}
@@ -254,6 +272,11 @@ function ResidentDashboard({ role }: { role: Role }) {
         </View>
       </View>
 
+      {/* Subscription banner — building admins only, always visible: trial
+          countdown, the active plan, or a subscribe prompt. Taps into the
+          (admin-only) plans page. */}
+      {canToggleAdminView && <SubscriptionBanner building={building} onPress={() => navigation.navigate('Plans')} />}
+
       {/* Stat strip */}
       {statCards.length > 0 && (
         <ScrollView
@@ -269,11 +292,10 @@ function ResidentDashboard({ role }: { role: Role }) {
       {allowedModules.length > 0 && (
         <>
           <SectionHeader title={t('dash_modules')} />
-          <View style={styles.quickGrid}>
-            {allowedModules.map((m) => (
-              <ModuleTile key={m.id} module={m} onPress={() => navigation.getParent()?.navigate(m.route as never)} />
-            ))}
-          </View>
+          <ModulesGrid
+            modules={allowedModules}
+            onPress={(m) => navigation.getParent()?.navigate(m.route as never)}
+          />
         </>
       )}
 
@@ -323,23 +345,93 @@ function ResidentDashboard({ role }: { role: Role }) {
   );
 }
 
-function ModuleTile({ module, onPress }: { module: ModuleEntry; onPress: () => void }) {
-  const { t } = useI18n();
-  const toneColors: Record<string, { fg: string; soft: string }> = {
-    accent: { fg: palette.accent, soft: palette.accentSoft },
-    positive: { fg: palette.success, soft: palette.successSoft },
-    warning: { fg: palette.warning, soft: palette.warningSoft },
-    danger: { fg: palette.danger, soft: palette.dangerSoft },
-    neutral: { fg: palette.textMuted, soft: palette.surfaceMuted },
-  };
-  const tone = toneColors[module.tone];
+/**
+ * Always-on subscription strip for building admins. One of three states:
+ * trial countdown, active plan name, or a "no subscription" prompt (the
+ * server migrates legacy buildings onto a trial, so that last state is a
+ * brief transition at worst).
+ */
+function SubscriptionBanner({
+  building,
+  onPress,
+}: {
+  building: ReturnType<typeof useAuth>['building'];
+  onPress: () => void;
+}) {
+  const { t, tf } = useI18n();
+  const sub = building?.subscription;
+
+  let text: string;
+  let iconName: IconName = 'sparkles';
+  if (sub?.status === 'trial' && (sub.trialDaysLeft ?? 0) > 0) {
+    text = tf('trial_banner_text', { days: sub.trialDaysLeft ?? 0 });
+  } else if (sub?.status === 'active' && sub.plan) {
+    const nameKey: StringKey =
+      sub.plan === 'basic' ? 'plan_basic_name' : sub.plan === 'pro' ? 'plan_pro_name' : 'plan_premium_name';
+    text = tf('sub_banner_active', { plan: t(nameKey) });
+    iconName = 'shieldCheck';
+  } else {
+    text = t('sub_banner_none');
+    iconName = 'warning';
+  }
+
   return (
-    <TouchableOpacity style={styles.moduleTile} activeOpacity={0.85} onPress={onPress}>
-      <View style={[styles.moduleIcon, { backgroundColor: tone.soft }]}>
-        <Icon name={module.icon} size={24} color={tone.fg} />
+    <TouchableOpacity style={styles.trialBanner} activeOpacity={0.85} onPress={onPress}>
+      <View style={styles.trialBannerIcon}>
+        <Icon name={iconName} size={16} color={palette.accent} strokeWidth={2.4} />
       </View>
-      <Text style={styles.moduleLabel}>{t(module.labelKey)}</Text>
-      <View style={[styles.moduleStripe, { backgroundColor: tone.fg }]} />
+      <Text style={styles.trialBannerText} numberOfLines={1}>
+        {text}
+      </Text>
+      <Text style={styles.trialBannerCta}>{t('sub_banner_manage')}</Text>
+    </TouchableOpacity>
+  );
+}
+
+const GRID_COLS = 3;
+const GRID_GAP = 10;
+
+/** Two-stop gradients that give each module tile's icon chip its energy. */
+const TONE_GRADIENTS: Record<ModuleEntry['tone'], [string, string]> = {
+  accent: ['#818cf8', '#4f46e5'],
+  positive: ['#34d399', '#059669'],
+  warning: ['#fbbf24', '#d97706'],
+  danger: ['#f87171', '#dc2626'],
+  neutral: ['#94a3b8', '#475569'],
+};
+
+/**
+ * Fixed 3-column grid with pixel-exact tile widths. Percentage widths plus
+ * `gap` overflow the row by a fraction of a point and wrap to 2 ragged
+ * columns — computing from the window width keeps every row aligned.
+ */
+function ModulesGrid({ modules, onPress }: { modules: ModuleEntry[]; onPress: (m: ModuleEntry) => void }) {
+  const { width } = useWindowDimensions();
+  const tileWidth = Math.floor((width - spacing.lg * 2 - GRID_GAP * (GRID_COLS - 1)) / GRID_COLS);
+  return (
+    <View style={styles.quickGrid}>
+      {modules.map((m) => (
+        <ModuleTile key={m.id} module={m} width={tileWidth} onPress={() => onPress(m)} />
+      ))}
+    </View>
+  );
+}
+
+function ModuleTile({ module, width, onPress }: { module: ModuleEntry; width: number; onPress: () => void }) {
+  const { t } = useI18n();
+  const gradient = TONE_GRADIENTS[module.tone];
+  return (
+    <TouchableOpacity style={[styles.moduleTile, { width }]} activeOpacity={0.8} onPress={onPress}>
+      <LinearGradient
+        colors={gradient}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.moduleIcon}
+      >
+        <Icon name={module.icon} size={24} color="#fff" strokeWidth={2.2} />
+      </LinearGradient>
+      <Text style={styles.moduleLabel} numberOfLines={1}>{t(module.labelKey)}</Text>
+      <View style={[styles.moduleStripe, { backgroundColor: gradient[1] }]} />
     </TouchableOpacity>
   );
 }
@@ -540,7 +632,13 @@ function PaymentSummary({ nextDue, overdue, outstanding, balance, currency }: { 
                 <Text style={type.caption}>{tf('dash_due', { relative: relativeDay(nextDue.dueDate) })}</Text>
                 <Text style={[type.display, { marginTop: 4 }]}>{fmtMoney(nextDue.amount, currency)}</Text>
                 <Text style={[type.small, { marginTop: 2 }]}>
-                  {nextDue.type.replace(/_/g, ' ')}
+                  {t(
+                    nextDue.type === 'monthly_dues'
+                      ? 'ptype_building_dues'
+                      : nextDue.type === 'expense_split'
+                        ? 'ptype_utilities'
+                        : 'ptype_special',
+                  )}
                 </Text>
               </View>
               <Pill
@@ -676,17 +774,39 @@ const styles = StyleSheet.create({
   },
   heroPillText: { color: '#fff', fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.6 },
 
+  trialBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: palette.accentSoft,
+    borderWidth: 1,
+    borderColor: '#c7d2fe',
+    borderRadius: 14,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    marginBottom: spacing.lg,
+  },
+  trialBannerIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#e0e7ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trialBannerText: { flex: 1, fontSize: 13, fontWeight: '700', color: palette.accent },
+  trialBannerCta: { fontSize: 12.5, fontWeight: '800', color: palette.accent, textDecorationLine: 'underline' },
+
   statsRow: { paddingEnd: spacing.lg, gap: spacing.md },
   statCard: { width: 160, marginEnd: spacing.md },
 
-  quickGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  quickGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP },
   moduleTile: {
-    width: '31.5%',
     backgroundColor: palette.surface,
-    borderRadius: 16,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: palette.border,
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.lg,
     paddingHorizontal: 6,
     alignItems: 'center',
     overflow: 'hidden',
@@ -695,11 +815,11 @@ const styles = StyleSheet.create({
   moduleIcon: {
     width: 52,
     height: 52,
-    borderRadius: 26,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  moduleLabel: { fontSize: 12, color: palette.text, fontWeight: '600', marginTop: 8, textAlign: 'center' },
+  moduleLabel: { fontSize: 12.5, color: palette.text, fontWeight: '700', marginTop: 10, textAlign: 'center' },
   moduleStripe: {
     position: 'absolute',
     bottom: 0,

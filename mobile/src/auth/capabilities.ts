@@ -54,6 +54,10 @@ export const ACTIONS = {
   UNIT_UPDATE: 'action.unit.update',
   USER_MANAGE: 'action.user.manage',
   USER_PROMOTE: 'action.user.promote',
+  // Owner-scoped: manage renters/dependents living in units the user owns.
+  TENANT_MANAGE: 'action.user.manage_tenants',
+  // Owner-scoped: set unit rent, create rent charges, mark them paid.
+  RENT_MANAGE: 'action.rent.manage',
 } as const;
 
 export interface Capabilities {

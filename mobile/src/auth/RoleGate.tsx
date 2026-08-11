@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { useAuth, type Role } from './AuthContext';
+import { hasModule } from './capabilities';
 import { colors } from '../components/theme';
 
 /**
@@ -15,22 +16,30 @@ import { colors } from '../components/theme';
  *  - `roles=['owner', ...]`                     → strict role match
  *  - `requireBuildingAdmin`                     → owner role + isBuildingAdmin
  *                                                  (ignores `roles`)
+ *  - `module='module.units'`                    → effective capabilities
+ *                                                  include this module
+ *                                                  (view-mode aware; ignores
+ *                                                  the other props)
  */
 export function RoleGate({
   children,
   roles,
   requireBuildingAdmin,
+  module,
 }: {
   children: ReactNode;
   roles?: Role[];
   requireBuildingAdmin?: boolean;
+  module?: string;
 }) {
-  const { user } = useAuth();
+  const { user, capabilities } = useAuth();
   if (!user) return null;
   const isBuildingAdminOwner = user.role === 'owner' && !!user.isBuildingAdmin;
-  const allowed = requireBuildingAdmin
-    ? isBuildingAdminOwner
-    : !!roles && roles.includes(user.role);
+  const allowed = module
+    ? hasModule(capabilities, module)
+    : requireBuildingAdmin
+      ? isBuildingAdminOwner
+      : !!roles && roles.includes(user.role);
   if (!allowed) {
     return (
       <View style={styles.container}>

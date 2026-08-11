@@ -11,6 +11,9 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { AuthStackParamList } from '../navigation/types';
 import { useAuth } from '../auth/AuthContext';
 import {
   hasBiometricCredentials,
@@ -45,6 +48,7 @@ export function LoginPage() {
   const { login, loginWithBiometric, loginWithRefreshToken } = useAuth();
   const { confirm } = useConfirm();
   const t = useT();
+  const navigation = useNavigation<NativeStackNavigationProp<AuthStackParamList>>();
   const passwordRef = useRef<TextInput>(null);
 
   const [country, setCountry] = useState<Country>(DEFAULT_COUNTRY);
@@ -408,6 +412,15 @@ export function LoginPage() {
           </Card>
 
           <Text style={styles.footnote}>{t('new_users_invite_only')}</Text>
+
+          <TouchableOpacity
+            style={styles.createBuildingBtn}
+            activeOpacity={0.85}
+            onPress={() => navigation.navigate('Signup')}
+          >
+            <Icon name="buildings" size={18} color={palette.accent} />
+            <Text style={styles.createBuildingText}>{t('login_create_building')}</Text>
+          </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
 
@@ -541,4 +554,17 @@ const styles = StyleSheet.create({
   recentPinText: { fontSize: 13, fontWeight: '700', color: palette.accent },
   recentRemove: { padding: 6 },
   footnote: { ...type.small, textAlign: 'center', marginTop: spacing.md },
+  createBuildingBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    paddingVertical: 14,
+    borderRadius: radii.lg,
+    borderWidth: 1.5,
+    borderColor: palette.accent,
+    backgroundColor: palette.accentSoft,
+  },
+  createBuildingText: { color: palette.accent, fontSize: 14, fontWeight: '800' },
 });

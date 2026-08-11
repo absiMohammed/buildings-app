@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { Alert, I18nManager } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { setLocaleDirection } from '../components/theme';
+import { setFormatLocale } from '../utils/format';
 import { format, isRTL, STRINGS, type Locale, type StringKey } from './strings';
 
 const STORAGE_KEY = 'ba_locale';
@@ -28,6 +29,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
         const stored = (await AsyncStorage.getItem(STORAGE_KEY)) as Locale | null;
         const resolved: Locale = stored === 'en' || stored === 'ar' ? stored : DEFAULT_LOCALE;
         setLocaleDirection(isRTL(resolved));
+        setFormatLocale(resolved);
         setLocaleState(resolved);
         I18nManager.allowRTL(true);
         if (I18nManager.isRTL !== isRTL(resolved)) {
@@ -42,6 +44,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
 
   const setLocale = useCallback(async (l: Locale) => {
     setLocaleDirection(isRTL(l));
+    setFormatLocale(l);
     setLocaleState(l);
     await AsyncStorage.setItem(STORAGE_KEY, l);
     if (I18nManager.isRTL !== isRTL(l)) {

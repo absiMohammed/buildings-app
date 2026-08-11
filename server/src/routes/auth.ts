@@ -5,6 +5,7 @@ import {
   loginSchema,
   acceptInviteSchema,
   refreshSchema,
+  registerBuildingSchema,
 } from '../validators/auth.js';
 import {
   loginWithPassword,
@@ -13,6 +14,8 @@ import {
   logoutAll,
   acceptInvite,
   switchActiveBuilding,
+  registerBuilding,
+  type RegisterBuildingArgs,
 } from '../services/auth.service.js';
 import { authenticate, type AuthedRequest } from '../middleware/auth.js';
 import { verifyRefreshToken } from '../utils/jwt.js';
@@ -28,6 +31,22 @@ router.post(
     const { identifier, email, password } = req.body as { identifier?: string; email?: string; password: string };
     const result = await loginWithPassword(identifier ?? email ?? '', password);
     res.json({
+      user: await toUserPayload(result.user),
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+    });
+  })
+);
+
+// Public self-service signup: creates the building, the founder's apartment
+// unit, and the founder as owner + building admin on a 1-month trial, then
+// signs them in (same response shape as /login).
+router.post(
+  '/register-building',
+  validate(registerBuildingSchema),
+  asyncHandler(async (req, res) => {
+    const result = await registerBuilding(req.body as RegisterBuildingArgs);
+    res.status(201).json({
       user: await toUserPayload(result.user),
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,

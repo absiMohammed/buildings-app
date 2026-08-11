@@ -1,6 +1,7 @@
 export type AuthStackParamList = {
   Login: undefined;
   AcceptInvite: { token?: string } | undefined;
+  Signup: undefined;
 };
 
 /**
@@ -35,6 +36,7 @@ export type AppStackParamList = {
   AdminPricing: undefined;
   AdminPayments: undefined;
   Settings: undefined;
+  Plans: undefined;
 };
 
 /**

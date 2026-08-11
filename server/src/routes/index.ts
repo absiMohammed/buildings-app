@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, enforceBuildingActive } from '../middleware/auth.js';
+import { router as plansRouter } from './plans.js';
 import { router as authRouter } from './auth.js';
 import { router as meRouter } from './me.js';
 import { router as invitesRouter } from './invites.js';
@@ -21,7 +22,11 @@ router.use('/auth', authRouter);
 
 // All other routes require auth
 router.use(authenticate);
+// Suspended/inactive buildings: residents are blocked; building admins keep
+// /me and /plans so they can reach the paywall and subscribe.
+router.use(enforceBuildingActive);
 
+router.use('/plans', plansRouter);
 router.use('/me', meRouter);
 router.use('/invites', invitesRouter);
 router.use('/users', usersRouter);

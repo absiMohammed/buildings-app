@@ -72,6 +72,13 @@ export const ACTIONS = {
   UNIT_UPDATE: 'action.unit.update',
   USER_MANAGE: 'action.user.manage', // activate/deactivate
   USER_PROMOTE: 'action.user.promote', // change role (e.g. owner → admin)
+  // Owner-scoped roster powers: manage the renters/dependents living in
+  // units the caller OWNS (create, edit name/phone, reset creds, suspend).
+  // Server routes narrow every mutation to the caller's own units.
+  TENANT_MANAGE: 'action.user.manage_tenants',
+  // Owner-scoped rent: set a unit's monthly rent, create rent charges and
+  // mark them paid — only on units the caller owns.
+  RENT_MANAGE: 'action.rent.manage',
   // System-admin only: full CRUD over the Buildings collection.
   BUILDING_CRUD: 'action.building.crud',
   // System-admin (or existing building admin): toggle an owner's
@@ -158,14 +165,22 @@ const OWNER_CAPS: Capabilities = {
     ...RESIDENT_WIDGETS,
     WIDGETS.CHART_PAYMENTS_BY_CATEGORY,
   ],
-  modules: RESIDENT_MODULES,
+  // Owners get the Units + Users surfaces scoped to THEIR OWN units: the
+  // server only returns units they hold and the renters/dependents living
+  // in units they own.
+  modules: [...RESIDENT_MODULES, MODULES.UNITS, MODULES.USERS],
+  // No PAYMENT_RECORD: recording/creating building payments is exclusively a
+  // building-admin action — plain owners only view their payment state.
+  // RENT_MANAGE is the exception: rent on their own units is the owner's
+  // business (set the amount, create charges, mark them paid).
   actions: [
-    ACTIONS.PAYMENT_RECORD,
     ACTIONS.POLL_VOTE,
     ACTIONS.TICKET_CREATE,
     ACTIONS.TICKET_RESOLVE, // owners fix tickets that belong to their unit
     ACTIONS.DOCUMENT_UPLOAD,
     ACTIONS.USER_INVITE, // owners can invite renters/dependents into their unit
+    ACTIONS.TENANT_MANAGE,
+    ACTIONS.RENT_MANAGE,
   ],
 };
 
@@ -240,6 +255,7 @@ export function getBuildingAdminCapabilities(): Capabilities {
 import { Building } from '../models/Building.js';
 import { Unit } from '../models/Unit.js';
 import { primaryMembership, membershipsForBuilding, type UserDoc } from '../models/User.js';
+import { planModulesFor, trialDaysLeft } from './plans.service.js';
 
 /**
  * Build the /me + login payload for a user, scoped to ONE active membership
@@ -272,12 +288,20 @@ export async function toUserPayload(
   ]);
   const buildingName = new Map(allBuildings.map((b) => [String(b._id), b.name]));
 
+  // Two independent module restrictions can apply: the system-admin-set
+  // allow-list on the building, and the building's subscription plan tier.
+  // The effective set is the intersection of whichever are present.
   const buildingEnabled: string[] | null =
     !isAdmin && Array.isArray((building as { enabledModules?: string[] } | null)?.enabledModules)
       ? ((building as { enabledModules?: string[] }).enabledModules ?? null)
       : null;
-  const filterCaps = (c: Capabilities): Capabilities =>
-    buildingEnabled ? { ...c, modules: c.modules.filter((m) => buildingEnabled.includes(m)) } : c;
+  const planEnabled: string[] | null = !isAdmin && building ? planModulesFor(building) : null;
+  const filterCaps = (c: Capabilities): Capabilities => {
+    let modules = c.modules;
+    if (buildingEnabled) modules = modules.filter((m) => buildingEnabled.includes(m));
+    if (planEnabled) modules = modules.filter((m) => planEnabled.includes(m));
+    return modules === c.modules ? c : { ...c, modules };
+  };
 
   const memberships = user.memberships.map((m) => ({
     buildingId: String(m.buildingId),
@@ -305,8 +329,27 @@ export async function toUserPayload(
           name: building.name,
           currency: building.currency,
           status: (building as { status?: string }).status ?? 'active',
+          stories: (building as { stories?: number }).stories ?? 1,
           enabledModules: (building as { enabledModules?: string[] }).enabledModules ?? null,
           settings: building.settings,
+          subscription: (() => {
+            const sub = (building as {
+              subscription?: {
+                plan?: string;
+                status?: string;
+                trialEndsAt?: Date | null;
+                currentPeriodEnd?: Date | null;
+              };
+            }).subscription;
+            if (!sub) return null;
+            return {
+              plan: sub.plan ?? null,
+              status: sub.status ?? 'none',
+              trialEndsAt: sub.trialEndsAt ?? null,
+              currentPeriodEnd: sub.currentPeriodEnd ?? null,
+              trialDaysLeft: trialDaysLeft(building),
+            };
+          })(),
         }
       : null,
     unit: firstUnit

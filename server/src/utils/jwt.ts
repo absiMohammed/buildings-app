@@ -11,6 +11,10 @@ export interface AccessTokenPayload {
   // First unit of the active membership (compat convenience; a membership may
   // cover several units — see the /me payload's `units`). null when none.
   unitId: string | null;
+  // EVERY unit the user holds in the active building, across all their
+  // memberships there (owner of one unit, tenant of another, …). Routes
+  // that scope reads/writes by unit must use this, not `unitId`.
+  unitIds?: string[];
   // Whether the active membership is a building admin.
   isBuildingAdmin?: boolean;
   /** Issued-at timestamp in seconds, set by jsonwebtoken on sign. */

@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { api } from '../api/client';
 import { createSystemAdmin } from '../api/users';
+import { useAuth } from '../auth/AuthContext';
 import { CountryPicker } from './CountryPicker';
 import { Icon } from './Icon';
 import { COUNTRIES, DEFAULT_COUNTRY, type Country } from '../data/countries';
@@ -86,6 +87,10 @@ function parsePhone(e164: string): { country: Country; national: string } {
 
 export function CreateUserModal({ open, onClose, onCreated, building, lockedUnit, editUser }: CreateUserModalProps) {
   const { t, tf } = useI18n();
+  const { user: viewer } = useAuth();
+  // Building admins reach this modal too (locked to their building); the
+  // system-admin-only endpoints below must not be used for them.
+  const viewerIsSystemAdmin = viewer?.role === 'admin';
   const locked = !!building;
   const isEdit = !!editUser;
   const lockedBuildingId = building?._id;
@@ -142,9 +147,15 @@ export function CreateUserModal({ open, onClose, onCreated, building, lockedUnit
         setDrafts([blankDraft()]);
       }
       setAsSystemAdmin(false);
-      setRole('owner');
-      setUnitIds(lockedUnitId ? [lockedUnitId] : []);
-      setIsBuildingAdmin(false);
+      // Locked edit: seed the single-membership controls from the user's
+      // membership in the locked building so the form reflects reality.
+      const lockedMine =
+        editUser && lockedBuildingId
+          ? editUser.memberships.find((m) => m.buildingId === lockedBuildingId)
+          : undefined;
+      setRole(lockedMine?.role ?? 'owner');
+      setUnitIds(lockedMine ? [...lockedMine.unitIds] : lockedUnitId ? [lockedUnitId] : []);
+      setIsBuildingAdmin(lockedMine?.isBuildingAdmin ?? false);
       setUnitsByBuilding({});
       setError(null);
       setSuccess(null);
@@ -175,11 +186,14 @@ export function CreateUserModal({ open, onClose, onCreated, building, lockedUnit
     };
   }, [open, locked]);
 
-  // Fetch (and cache) a building's units on demand.
+  // Fetch (and cache) a building's units on demand. System admins use the
+  // cross-building route; building admins use their building-scoped one.
   async function ensureUnits(buildingId: string) {
     if (unitsByBuilding[buildingId]) return;
     try {
-      const r = await api.get(`/buildings/${buildingId}/units`);
+      const r = viewerIsSystemAdmin
+        ? await api.get(`/buildings/${buildingId}/units`)
+        : await api.get('/units');
       setUnitsByBuilding((prev) => ({ ...prev, [buildingId]: (r.data?.units ?? []) as UnitLite[] }));
     } catch {
       setUnitsByBuilding((prev) => ({ ...prev, [buildingId]: [] }));
@@ -227,16 +241,22 @@ export function CreateUserModal({ open, onClose, onCreated, building, lockedUnit
     setSubmitting(true);
     try {
       if (isEdit && editUser) {
+        // Locked mode edits the single membership shown in the form; global
+        // mode edits the full multi-building draft list. (For building
+        // admins the server preserves other-building memberships anyway.)
+        const memberships = locked
+          ? [{ buildingId: lockedBuildingId!, role, unitIds, isBuildingAdmin }]
+          : drafts.map((d) => ({
+              buildingId: d.buildingId,
+              role: d.role,
+              unitIds: d.unitIds,
+              isBuildingAdmin: d.isBuildingAdmin,
+            }));
         await api.patch(`/users/${editUser._id}`, {
           firstName: firstName.trim(),
           lastName: lastName.trim() || undefined,
           phone,
-          memberships: drafts.map((d) => ({
-            buildingId: d.buildingId,
-            role: d.role,
-            unitIds: d.unitIds,
-            isBuildingAdmin: d.isBuildingAdmin,
-          })),
+          memberships,
         });
         onCreated?.();
         onClose();

@@ -26,8 +26,23 @@ export function fmtMoneyCompact(amount: number, currency = 'ILS'): string {
   return `${sym}${amount.toFixed(0)}`;
 }
 
+// Module-level locale mirror, set by the LanguageProvider on load/switch.
+// Keeps these pure helpers usable outside React (no hook needed) while
+// still producing localized output.
+let formatLocale: 'en' | 'ar' = 'ar';
+export function setFormatLocale(locale: 'en' | 'ar'): void {
+  formatLocale = locale;
+}
+
 export function relativeDay(iso: string): string {
   const diff = Math.round((new Date(iso).getTime() - Date.now()) / dayMs);
+  if (formatLocale === 'ar') {
+    if (diff === 0) return 'اليوم';
+    if (diff === 1) return 'غداً';
+    if (diff === -1) return 'أمس';
+    if (diff > 0) return `بعد ${diff} يوم`;
+    return `قبل ${Math.abs(diff)} يوم`;
+  }
   if (diff === 0) return 'today';
   if (diff === 1) return 'tomorrow';
   if (diff === -1) return 'yesterday';

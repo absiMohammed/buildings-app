@@ -12,6 +12,7 @@ import {
   type UserDoc,
 } from '../models/User.js';
 import { Building } from '../models/Building.js';
+import { Unit } from '../models/Unit.js';
 import { NotFound, BadRequest, Conflict, Forbidden } from '../utils/errors.js';
 import {
   createSystemAdmin,
@@ -70,14 +71,67 @@ export function rosterRow(u: UserDoc, buildingId: string) {
   };
 }
 
+// Every unit in the caller's active building that the caller OWNS.
+// `Unit.ownerId` is the canonical owner marker (kept in sync by
+// createInvite/updateUserByAdmin), so it's the source of truth here.
+async function unitIdsOwnedBy(me: AuthedRequest['user']): Promise<string[]> {
+  if (!me.buildingId) return [];
+  const units = await Unit.find({ buildingId: me.buildingId, ownerId: me.sub })
+    .select('_id')
+    .lean();
+  return units.map((u) => String(u._id));
+}
+
+/** True when `target` is a renter/dependent living in a unit `me` owns (and
+ *  not a building admin — owners never manage their building's admins). */
+async function ownerManages(me: AuthedRequest['user'], target: UserDoc): Promise<boolean> {
+  if (me.role !== 'owner' || !me.buildingId) return false;
+  if (target.systemRole === 'admin') return false;
+  const ms = membershipsForBuilding(target, me.buildingId);
+  if (ms.some((m) => m.isBuildingAdmin)) return false;
+  const mine = await unitIdsOwnedBy(me);
+  return ms.some(
+    (m) =>
+      (m.role === 'renter' || m.role === 'dependent') &&
+      m.unitIds.some((u) => mine.includes(String(u))),
+  );
+}
+
 router.get(
   '/',
-  requireBuildingAdmin,
   asyncHandler(async (req, res) => {
     const me = (req as AuthedRequest).user;
-    const buildingId = me.buildingId as string;
-    const users = await User.find({ 'memberships.buildingId': buildingId }).sort({ createdAt: -1 });
-    res.json({ users: users.map((u) => rosterRow(u, buildingId)) });
+    const buildingId = me.buildingId;
+    if (!buildingId) throw Forbidden('Building context required');
+
+    // Building admins see the whole roster.
+    if (me.isBuildingAdmin) {
+      const users = await User.find({ 'memberships.buildingId': buildingId }).sort({ createdAt: -1 });
+      res.json({ users: users.map((u) => rosterRow(u, buildingId)) });
+      return;
+    }
+
+    // Plain owners see the renters/dependents living in units they own.
+    if (me.role === 'owner') {
+      const mine = await unitIdsOwnedBy(me);
+      if (mine.length === 0) {
+        res.json({ users: [] });
+        return;
+      }
+      const users = await User.find({
+        memberships: {
+          $elemMatch: {
+            buildingId,
+            role: { $in: ['renter', 'dependent'] },
+            unitIds: { $in: mine },
+          },
+        },
+      }).sort({ createdAt: -1 });
+      res.json({ users: users.map((u) => rosterRow(u, buildingId)) });
+      return;
+    }
+
+    throw Forbidden('Not allowed');
   })
 );
 
@@ -114,16 +168,53 @@ router.patch(
       return;
     }
 
-    // Building admin: display name only, for a user in their own building.
+    // Building admin: full edit (name, phone, and memberships) for a user in
+    // their own building — same power as when creating one. Membership edits
+    // are confined to their building; memberships the target holds in OTHER
+    // buildings are carried through untouched.
     if (me.isBuildingAdmin && me.buildingId) {
+      const myBuildingId = me.buildingId;
       const target = await User.findById(req.params.id);
       if (!target) throw NotFound('User not found');
       if (target.systemRole === 'admin') throw Forbidden('Not allowed');
-      if (!membershipFor(target, me.buildingId)) throw Forbidden('Building admin required');
-      if (body.firstName !== undefined) target.firstName = body.firstName;
-      if (body.lastName !== undefined) target.lastName = body.lastName;
-      await target.save();
-      res.json({ user: rosterRow(target, me.buildingId) });
+      if (!membershipFor(target, myBuildingId)) throw Forbidden('Building admin required');
+
+      let memberships = body.memberships;
+      if (memberships) {
+        if (memberships.some((m) => String(m.buildingId) !== myBuildingId)) {
+          throw Forbidden('You can only manage memberships of your own building.');
+        }
+        const others = target.memberships
+          .filter((m) => String(m.buildingId) !== myBuildingId)
+          .map((m) => ({
+            buildingId: String(m.buildingId),
+            role: m.role as 'owner' | 'renter' | 'dependent' | 'independent',
+            unitIds: m.unitIds.map((u) => String(u)),
+            isBuildingAdmin: !!m.isBuildingAdmin,
+          }));
+        memberships = [...memberships, ...others];
+      }
+
+      const user = await updateUserByAdmin(req.params.id ?? '', { ...body, memberships });
+      res.json({ user: rosterRow(user, myBuildingId) });
+      return;
+    }
+
+    // Plain owner: name/phone edits only, and only for the renters/dependents
+    // of units they own. Memberships stay admin-only territory.
+    if (me.role === 'owner' && me.buildingId) {
+      const target = await User.findById(req.params.id);
+      if (!target) throw NotFound('User not found');
+      if (!(await ownerManages(me, target))) {
+        throw Forbidden('You can only manage tenants and dependents of your own units.');
+      }
+      if (body.memberships) throw Forbidden('Only an admin can change memberships.');
+      const user = await updateUserByAdmin(req.params.id ?? '', {
+        firstName: body.firstName,
+        lastName: body.lastName,
+        phone: body.phone,
+      });
+      res.json({ user: rosterRow(user, me.buildingId) });
       return;
     }
 
@@ -131,8 +222,9 @@ router.patch(
   })
 );
 
-// Guard: system admin (any user) or building admin (own building, not the
-// super-admin). Returns the target for reuse.
+// Guard: system admin (any user), building admin (own building, not the
+// super-admin), or a plain owner acting on the renters/dependents of units
+// they own. Returns the target for reuse.
 async function assertCanManage(req: AuthedRequest) {
   const me = req.user;
   const target = await User.findById(req.params.id);
@@ -143,6 +235,7 @@ async function assertCanManage(req: AuthedRequest) {
     if (!membershipFor(target, me.buildingId)) throw Forbidden('Building admin required');
     return target;
   }
+  if (await ownerManages(me, target)) return target;
   throw Forbidden('Not allowed');
 }
 
@@ -176,12 +269,15 @@ router.patch(
     if (!user) throw NotFound('User not found');
 
     // System admin acts on any user; a building admin only on users in their
-    // own building (never the system admin).
+    // own building (never the system admin); a plain owner only on the
+    // renters/dependents of units they own.
     if (me.role === 'admin') {
       // allowed
     } else if (me.isBuildingAdmin && me.buildingId) {
       if (user.systemRole === 'admin') throw Forbidden('Not allowed');
       if (!membershipFor(user, me.buildingId)) throw Forbidden('Building admin required');
+    } else if (await ownerManages(me, user)) {
+      // allowed
     } else {
       throw Forbidden('Not allowed');
     }

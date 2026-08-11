@@ -66,7 +66,7 @@ router.post(
     // never belong to an apartment, and (b) the system admin appointing the
     // building admin BEFORE any units exist. Every other invite needs a unit.
     const adminAppointingBuildingAdmin =
-      me.role === 'admin' && role === 'owner' && !!bodyIsBuildingAdmin;
+      (me.role === 'admin' || !!me.isBuildingAdmin) && role === 'owner' && !!bodyIsBuildingAdmin;
     const unitOptional = role === 'independent' || adminAppointingBuildingAdmin;
     if (!unitId && !unitOptional) {
       throw BadRequest('unitId is required');
@@ -97,6 +97,10 @@ router.post(
     // the membership as a building admin; a building may have several admins.
     if (me.role === 'admin') {
       // No role restriction — unit/occupancy rules below still apply.
+    } else if (me.isBuildingAdmin) {
+      // Building admin manages their whole building: any role, any unit.
+      // (Building scoping was already enforced above; their own role in the
+      // building — owner, renter, … — is irrelevant to this power.)
     } else if (me.role === 'owner') {
       // Owner invites always have a unit (route guard above), but TS can't
       // narrow through the conditional so we re-assert here.
@@ -123,7 +127,7 @@ router.post(
     if (role === 'dependent') {
       if (!unitObjectId) throw BadRequest('Dependents require a unit');
       const hasRenter = (await unitOccupants(unitObjectId, 'renter')) > 0;
-      if (me.role === 'admin') {
+      if (me.role === 'admin' || me.isBuildingAdmin) {
         // Rule 4: admin has no quota. Link dependents to the renter (if any)
         // or to the owner so the invite still has a sensible parent ref.
         if (hasRenter) {
@@ -150,9 +154,10 @@ router.post(
       }
     }
 
-    // Only the system admin may set the building-admin flag, and it can apply
-    // to any building-scoped role (owner/renter/dependent), not owners alone.
-    const isBuildingAdmin = me.role === 'admin' && !!bodyIsBuildingAdmin;
+    // The system admin or an existing building admin may set the
+    // building-admin flag (a building can have several admins), and it can
+    // apply to any building-scoped role, not owners alone.
+    const isBuildingAdmin = (me.role === 'admin' || !!me.isBuildingAdmin) && !!bodyIsBuildingAdmin;
 
     const result = await createInvite({
       email,

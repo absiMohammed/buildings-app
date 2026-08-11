@@ -24,6 +24,7 @@ const PSTATUS_KEY: Record<Payment['status'], StringKey> = {
 // Reuse existing dues label where it maps; otherwise prettify the raw type.
 function paymentTypeLabel(pt: Payment['type'], t: ReturnType<typeof useI18n>['t']): string {
   if (pt === 'monthly_dues') return t('ptype_building_dues');
+  if (pt === 'rent') return t('ptype_rent');
   return pt
     .split('_')
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))

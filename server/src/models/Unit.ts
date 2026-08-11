@@ -11,6 +11,10 @@ const UnitSchema = new Schema(
     monthlyDuesAmount: { type: Number, default: null, min: 0 },
     // If set, overrides the building-wide settings.monthlyDuesDay for this unit only.
     monthlyDuesDayOverride: { type: Number, default: null, min: 1, max: 28 },
+    // Rent the owner charges their renter for this unit. null = no rent set.
+    // Managed by the unit's owner; billed monthly (type 'rent') alongside the
+    // dues run when a renter occupies the unit.
+    monthlyRentAmount: { type: Number, default: null, min: 0 },
     ownerId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     occupants: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     notes: { type: String, default: '' },

@@ -94,8 +94,13 @@ router.get(
     if (!poll) throw NotFound('Poll not found');
 
     const myVote = await Vote.findOne({ pollId: poll._id, userId: me.sub });
+    // Live tallies are visible once the viewer can no longer be swayed by
+    // them: closed polls for everyone, open polls for building admins and
+    // for residents who already cast their ballot.
+    const canSeeTallies =
+      poll.status === 'closed' || me.isBuildingAdmin || me.role === 'admin' || !!myVote;
     let tallies: Record<string, number> | undefined;
-    if (poll.status === 'closed') {
+    if (canSeeTallies) {
       const all = await Vote.find({ pollId: poll._id });
       tallies = {};
       for (const opt of poll.options) tallies[opt.id] = 0;

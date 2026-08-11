@@ -4,9 +4,15 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const ACCESS_KEY = 'ba_access';
 const REFRESH_KEY = 'ba_refresh';
 
-// Always talk to the deployed Fly backend, dev and release alike.
-// To point at a local server, change the host below temporarily.
-export const API_BASE_URL = 'https://building-app-api.fly.dev/api/v1';
+// Debug builds talk to the local server (npm run dev in server/ + the
+// docker-compose mongo) so new endpoints are testable before a deploy.
+// Release builds always use the deployed Fly backend. Flip LOCAL_API to
+// false to point a debug build at production.
+const LOCAL_API = true;
+export const API_BASE_URL =
+  __DEV__ && LOCAL_API
+    ? 'http://localhost:4000/api/v1'
+    : 'https://building-app-api.fly.dev/api/v1';
 
 let accessToken: string | null = null;
 let refreshToken: string | null = null;
