@@ -13,18 +13,22 @@ import {
   Segmented,
 } from '../components/ui';
 import { fmtDate, fmtMoney, fmtMoneyCompact, relativeDay } from '../utils/format';
-import { paymentTypeLabel } from '../utils/labels';
+import { paymentMethodLabel, paymentTypeLabel } from '../utils/labels';
 import {
   createPayment,
   isPartiallyPaid,
   listPayments,
   recordReceipts,
   remainingOf,
+  reviewClaim,
+  submitClaim,
   type Payment,
+  type PaymentClaim,
 } from '../api/payments';
 import { listUnits, type Unit } from '../api/units';
 import { apiErrorMessage, useApiResource } from '../api/useApiResource';
 import { RecordPaymentModal } from '../components/RecordPaymentModal';
+import { ClaimModal } from '../components/ClaimModal';
 import { NewChargeModal } from '../components/NewChargeModal';
 import { UnitFilterPicker } from '../components/UnitFilterPicker';
 import { useI18n } from '../i18n';
@@ -56,9 +60,11 @@ export function PaymentsPage() {
   const canMarkPaid = hasAction(caps, ACTIONS.PAYMENT_MARK_PAID);
   const canRecord = hasAction(caps, ACTIONS.PAYMENT_RECORD);
   const canManageRent = hasAction(caps, ACTIONS.RENT_MANAGE);
+  const canClaim = hasAction(caps, ACTIONS.PAYMENT_CLAIM);
   const [filter, setFilter] = useState<FilterValue>('all');
   const [unitFilter, setUnitFilter] = useState<string>('all');
   const [receivingFor, setReceivingFor] = useState<Payment | null>(null);
+  const [claimingFor, setClaimingFor] = useState<Payment | null>(null);
   const [newChargeOpen, setNewChargeOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const { t, tf } = useI18n();
@@ -98,6 +104,63 @@ export function PaymentsPage() {
     (p: Payment) =>
       canMarkPaid || canRecord || (canManageRent && p.type === 'rent' && ownedUnitIds.has(p.unitId)),
     [canMarkPaid, canRecord, canManageRent, ownedUnitIds],
+  );
+
+  // A resident may claim "I paid" on charges they're responsible for:
+  // the renter for rent, the owner for everything else. The server is the
+  // authority — this only decides whether to show the button.
+  const canClaimOn = useCallback(
+    (p: Payment) => {
+      if (!canClaim || canMarkPaid) return false;
+      if (p.status !== 'pending' && p.status !== 'overdue') return false;
+      if (!myUnitIds.has(p.unitId)) return false;
+      const isMyRent = user?.role === 'renter' && p.type === 'rent';
+      const isMyCharge = user?.role === 'owner' && p.type !== 'rent';
+      if (!isMyRent && !isMyCharge) return false;
+      // One pending claim at a time.
+      return !(p.claims ?? []).some((c) => c.status === 'pending');
+    },
+    [canClaim, canMarkPaid, myUnitIds, user],
+  );
+
+  async function submitClaimInput(input: { amount: number; method: 'cash' | 'transfer' | 'stripe' | 'other'; externalRef: string; note: string }) {
+    if (!claimingFor) return;
+    setBusy(true);
+    try {
+      await submitClaim(claimingFor._id, input);
+      setClaimingFor(null);
+      Alert.alert(t('claim_submitted'));
+      await reload();
+    } catch (e) {
+      Alert.alert(apiErrorMessage(e, t('err_generic')));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function review(p: Payment, claim: PaymentClaim, action: 'approve' | 'reject') {
+    setBusy(true);
+    try {
+      await reviewClaim(p._id, claim._id, action);
+      await reload();
+    } catch (e) {
+      Alert.alert(apiErrorMessage(e, t('err_generic')));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Charges with claims awaiting the reviewer (admins see these on top).
+  const pendingClaimRows = useMemo(
+    () =>
+      canMarkPaid
+        ? all.flatMap((p) =>
+            (p.claims ?? [])
+              .filter((c) => c.status === 'pending')
+              .map((c) => ({ payment: p, claim: c })),
+          )
+        : [],
+    [all, canMarkPaid],
   );
 
   // Map unit id → number for display and for the unit filter.
@@ -244,6 +307,48 @@ export function PaymentsPage() {
         <SummaryCard label={t('payments_summary_paid')} amount={totalsByStatus.paid} currency={currency} tone="positive" onPress={() => setFilter('paid')} active={filter === 'paid'} />
       </View>
 
+      {pendingClaimRows.length > 0 && (
+        <>
+          <Text style={[type.caption, styles.claimsHeader]}>{t('claims_review_title')}</Text>
+          <Card padded={false}>
+            {pendingClaimRows.map(({ payment: cp, claim }, i) => (
+              <View key={claim._id}>
+                <View style={styles.claimRow}>
+                  <IconCircle iconName="payments" tone="accent" />
+                  <View style={styles.flex1}>
+                    <Text style={[type.body, styles.bold]}>{fmtMoney(claim.amount, currency)}</Text>
+                    <Text style={type.small}>
+                      {tf('claim_row_meta', {
+                        unit: tf('maint_place_unit', { n: numberOf(cp.unitId) }),
+                        method: paymentMethodLabel(t, claim.method),
+                        date: fmtDate(claim.at),
+                      })}
+                      {claim.externalRef ? ` · ${claim.externalRef}` : ''}
+                    </Text>
+                  </View>
+                  <View style={styles.claimActions}>
+                    <Button
+                      label={t('claim_approve')}
+                      onPress={() => void review(cp, claim, 'approve')}
+                      loading={busy}
+                      style={styles.claimBtn}
+                    />
+                    <Button
+                      label={t('claim_reject')}
+                      variant="danger"
+                      onPress={() => void review(cp, claim, 'reject')}
+                      disabled={busy}
+                      style={styles.claimBtn}
+                    />
+                  </View>
+                </View>
+                {i < pendingClaimRows.length - 1 && <View style={styles.claimDivider} />}
+              </View>
+            ))}
+          </Card>
+        </>
+      )}
+
       {unitsInScope.length > 1 && (
         <UnitFilterPicker
           units={unitsInScope}
@@ -285,7 +390,9 @@ export function PaymentsPage() {
               currency={currency}
               canAct={(p.status === 'pending' || p.status === 'overdue') && canActOn(p)}
               canMarkPaid={canMarkPaid}
+              canClaim={canClaimOn(p)}
               onAct={() => setReceivingFor(p)}
+              onClaim={() => setClaimingFor(p)}
             />
           ))}
         </View>
@@ -298,6 +405,15 @@ export function PaymentsPage() {
         units={units}
         currency={currency}
         onCreate={(input) => void createCharges(input)}
+      />
+
+      <ClaimModal
+        open={!!claimingFor}
+        payment={claimingFor}
+        currency={currency}
+        submitting={busy}
+        onClose={() => setClaimingFor(null)}
+        onSubmit={(input) => void submitClaimInput(input)}
       />
 
       {receivingFor && (
@@ -336,7 +452,7 @@ function SummaryCard({ label, amount, currency, tone, onPress, active }: { label
   );
 }
 
-function PaymentCard({ payment, unitNumber, currency, canAct, canMarkPaid, onAct }: { payment: Payment; unitNumber: string; currency: string; canAct: boolean; canMarkPaid: boolean; onAct: () => void }) {
+function PaymentCard({ payment, unitNumber, currency, canAct, canMarkPaid, canClaim, onAct, onClaim }: { payment: Payment; unitNumber: string; currency: string; canAct: boolean; canMarkPaid: boolean; canClaim: boolean; onAct: () => void; onClaim: () => void }) {
   const { t, tf } = useI18n();
   const tone: 'positive' | 'danger' | 'warning' | 'neutral' | 'accent' =
     payment.status === 'paid'
@@ -376,6 +492,9 @@ function PaymentCard({ payment, unitNumber, currency, canAct, canMarkPaid, onAct
               tone="accent"
             />
           )}
+          {(payment.claims ?? []).some((c) => c.status === 'pending') && (
+            <Pill label={t('claim_pending_pill')} tone="info" />
+          )}
         </View>
       </View>
 
@@ -403,11 +522,26 @@ function PaymentCard({ payment, unitNumber, currency, canAct, canMarkPaid, onAct
           style={{ marginTop: spacing.md }}
         />
       )}
+      {canClaim && (
+        <Button
+          label={t('claim_button')}
+          onPress={onClaim}
+          variant="secondary"
+          style={{ marginTop: spacing.md }}
+        />
+      )}
     </Card>
   );
 }
 
 const styles = StyleSheet.create({
+  claimsHeader: { marginBottom: spacing.sm },
+  claimRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md },
+  claimActions: { gap: spacing.xs },
+  claimBtn: { paddingHorizontal: 12, paddingVertical: 8 },
+  claimDivider: { height: StyleSheet.hairlineWidth, backgroundColor: palette.divider },
+  flex1: { flex: 1 },
+  bold: { fontWeight: '700' },
   container: { flex: 1, backgroundColor: palette.bg },
   scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },

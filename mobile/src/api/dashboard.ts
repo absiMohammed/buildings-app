@@ -31,6 +31,7 @@ export interface DashboardSummary {
   activeResidents: number;
   openTickets: number;
   openPolls: number;
+  pendingClaims: number;
   nextDue: {
     remaining: number;
     dueDate: string;

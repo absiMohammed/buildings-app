@@ -79,7 +79,8 @@ export type NotificationType =
   | 'payment_overdue'
   | 'poll_open'
   | 'announcement'
-  | 'maintenance_update';
+  | 'maintenance_update'
+  | 'payment_claim';
 
 export interface ApiError {
   code: string;

@@ -6,6 +6,7 @@ const TYPES = [
   'poll_open',
   'announcement',
   'maintenance_update',
+  'payment_claim',
 ] as const;
 
 const NotificationSchema = new Schema(

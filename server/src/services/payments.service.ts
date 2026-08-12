@@ -47,7 +47,7 @@ export function planWaterfall(
  * financially responsible for the unit). Used both for receipt attribution
  * and for picking whose credit balance covers a freshly generated charge.
  */
-async function derivePayer(
+export async function derivePayer(
   payment: Pick<PaymentDoc, 'type' | 'buildingId'>,
   unit: Pick<UnitDoc, '_id' | 'ownerId'>
 ): Promise<Types.ObjectId | null> {

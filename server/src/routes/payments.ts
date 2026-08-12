@@ -6,7 +6,9 @@ import { requireBuildingAdmin, unitIdsOf, type AuthedRequest } from '../middlewa
 import { Payment } from '../models/Payment.js';
 import { Unit } from '../models/Unit.js';
 import { UserCredit } from '../models/UserCredit.js';
-import { generateMonthlyDues, recordReceipts, round2 } from '../services/payments.service.js';
+import { Notification } from '../models/Notification.js';
+import { User } from '../models/User.js';
+import { derivePayer, generateMonthlyDues, recordReceipts, round2 } from '../services/payments.service.js';
 import { Forbidden, NotFound, BadRequest } from '../utils/errors.js';
 
 export const router = Router();
@@ -197,6 +199,141 @@ router.patch(
     }
     await payment.save();
     res.json({ payment });
+  })
+);
+
+const claimSchema = z.object({
+  amount: z.number().positive(),
+  method: z.enum(['cash', 'transfer', 'stripe', 'other']).default('transfer'),
+  externalRef: z.string().max(120).optional(),
+  note: z.string().max(500).optional(),
+});
+
+// Resident "I paid" claim — only the charge's responsible payer (renter for
+// rent, owner for everything else) may submit; the admin reviews it below.
+router.post(
+  '/:id/claims',
+  validate(claimSchema),
+  asyncHandler(async (req, res) => {
+    const me = (req as AuthedRequest).user;
+    const body = req.body as z.infer<typeof claimSchema>;
+    if (me.role === 'admin' || !me.buildingId) throw Forbidden('Building context required');
+    const payment = await Payment.findOne({ _id: req.params.id, buildingId: me.buildingId });
+    if (!payment) throw NotFound('Payment not found');
+    if (payment.status === 'paid' || payment.status === 'waived') {
+      throw BadRequest('This charge is already settled.');
+    }
+    const unit = await Unit.findById(payment.unitId);
+    if (!unit) throw NotFound('Unit not found');
+    const payer = await derivePayer(payment, unit);
+    if (!payer || payer.toString() !== me.sub) {
+      throw Forbidden('Only the responsible payer can claim this charge.');
+    }
+    const remaining = round2(payment.amount - payment.paidAmount);
+    if (body.amount > remaining + 0.005) {
+      throw BadRequest('Claim exceeds the remaining amount.');
+    }
+    if (payment.claims.some((c) => c.status === 'pending' && c.claimedBy?.toString() === me.sub)) {
+      throw BadRequest('You already have a claim awaiting review on this charge.');
+    }
+    payment.claims.push({
+      amount: body.amount,
+      method: body.method,
+      externalRef: body.externalRef ?? '',
+      note: body.note ?? '',
+      at: new Date(),
+      claimedBy: payer,
+      status: 'pending',
+      reviewedBy: null,
+      reviewedAt: null,
+    });
+    await payment.save();
+
+    // Tell the building admins there's money to confirm.
+    const admins = await User.find({
+      memberships: { $elemMatch: { buildingId: me.buildingId, isBuildingAdmin: true } },
+      status: 'active',
+    }).select('_id');
+    await Promise.all(
+      admins.map((a) =>
+        Notification.create({
+          userId: a._id,
+          buildingId: me.buildingId,
+          type: 'payment_claim',
+          title: `Payment claim — unit ${unit.number}`,
+          body: `${payment.currency} ${body.amount.toFixed(2)} via ${body.method}`,
+          link: '/payments',
+        })
+      )
+    );
+    res.status(201).json({ payment });
+  })
+);
+
+const reviewClaimSchema = z.object({
+  action: z.enum(['approve', 'reject']),
+  note: z.string().max(500).optional(),
+});
+
+// Review a claim. Approval converts it into a real receipt through the same
+// waterfall/permission path as a hand-recorded payment.
+router.post(
+  '/:id/claims/:claimId/review',
+  validate(reviewClaimSchema),
+  asyncHandler(async (req, res) => {
+    const me = (req as AuthedRequest).user;
+    const body = req.body as z.infer<typeof reviewClaimSchema>;
+    if (me.role === 'admin' || !me.buildingId) throw Forbidden('Building context required');
+    const payment = await Payment.findOne({ _id: req.params.id, buildingId: me.buildingId });
+    if (!payment) throw NotFound('Payment not found');
+    // Same reviewer rule as PATCH /:id: building admin for anything; a plain
+    // owner only for rent on units they own.
+    if (!me.isBuildingAdmin) {
+      const unit = await Unit.findById(payment.unitId).select('ownerId').lean();
+      const ownsUnit = unit?.ownerId?.toString() === me.sub;
+      if (payment.type !== 'rent' || !ownsUnit) {
+        throw Forbidden('You can only review claims on rent charges of units you own.');
+      }
+    }
+    const claim = payment.claims.id(String(req.params.claimId));
+    if (!claim) throw NotFound('Claim not found');
+    if (claim.status !== 'pending') throw BadRequest('Claim already reviewed.');
+
+    claim.status = body.action === 'approve' ? 'approved' : 'rejected';
+    claim.reviewedBy = me.sub as unknown as typeof claim.reviewedBy;
+    claim.reviewedAt = new Date();
+    if (body.note) claim.note = [claim.note, body.note].filter(Boolean).join(' · ');
+    await payment.save();
+
+    if (body.action === 'approve') {
+      // recordReceipts re-reads the payment; it also caps at remaining, so a
+      // race with another receipt surfaces as a clean error, not double money.
+      await recordReceipts({
+        buildingId: me.buildingId,
+        paymentIds: [payment._id.toString()],
+        amount: claim.amount,
+        method: claim.method as 'cash' | 'transfer' | 'stripe' | 'other',
+        externalRef: claim.externalRef || undefined,
+        note: claim.note || undefined,
+        payerId: claim.claimedBy?.toString(),
+        me: { sub: me.sub, isBuildingAdmin: Boolean(me.isBuildingAdmin) },
+      });
+    }
+
+    // Close the loop with the claimant either way.
+    if (claim.claimedBy) {
+      await Notification.create({
+        userId: claim.claimedBy,
+        buildingId: me.buildingId,
+        type: 'payment_claim',
+        title: body.action === 'approve' ? 'Payment claim approved' : 'Payment claim rejected',
+        body: `${payment.currency} ${claim.amount.toFixed(2)}`,
+        link: '/payments',
+      });
+    }
+
+    const fresh = await Payment.findById(payment._id);
+    res.json({ payment: fresh });
   })
 );
 

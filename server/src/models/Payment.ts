@@ -28,6 +28,24 @@ const ReceiptSchema = new Schema(
   { _id: true }
 );
 
+// A resident's "I paid" assertion, awaiting the admin's review. Approval
+// converts it into a real receipt via recordReceipts; the claim row stays
+// as the audit trail. Only the charge's responsible payer may claim.
+const ClaimSchema = new Schema(
+  {
+    amount: { type: Number, required: true, min: 0.01 },
+    method: { type: String, enum: ['cash', 'transfer', 'stripe', 'other'], default: 'transfer' },
+    externalRef: { type: String, default: '' },
+    note: { type: String, default: '' },
+    at: { type: Date, default: Date.now },
+    claimedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+    reviewedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    reviewedAt: { type: Date, default: null },
+  },
+  { _id: true }
+);
+
 const PaymentSchema = new Schema(
   {
     buildingId: { type: Schema.Types.ObjectId, ref: 'Building', required: true, index: true },
@@ -42,6 +60,7 @@ const PaymentSchema = new Schema(
     // client sums never unroll the receipts array.
     paidAmount: { type: Number, default: 0, min: 0 },
     receipts: { type: [ReceiptSchema], default: [] },
+    claims: { type: [ClaimSchema], default: [] },
     paidAt: { type: Date, default: null },
     paidBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     paymentMethod: { type: String, enum: METHODS, default: null },

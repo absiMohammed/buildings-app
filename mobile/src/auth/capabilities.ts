@@ -46,6 +46,8 @@ export const ACTIONS = {
   PAYMENT_CREATE: 'action.payment.create',
   PAYMENT_MARK_PAID: 'action.payment.mark_paid',
   PAYMENT_RECORD: 'action.payment.record',
+  // Resident-side: submit an "I paid" claim for admin review.
+  PAYMENT_CLAIM: 'action.payment.claim',
   POLL_CREATE: 'action.poll.create',
   POLL_VOTE: 'action.poll.vote',
   TICKET_CREATE: 'action.ticket.create',

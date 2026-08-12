@@ -17,6 +17,20 @@ export interface PaymentReceipt {
   payerId: string | null;
 }
 
+/** A resident's "I paid" assertion awaiting admin review. */
+export interface PaymentClaim {
+  _id: string;
+  amount: number;
+  method: Exclude<PaymentMethod, 'credit'>;
+  externalRef: string;
+  note: string;
+  at: string;
+  claimedBy: string | null;
+  status: 'pending' | 'approved' | 'rejected';
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+}
+
 export interface Payment {
   _id: string;
   buildingId: string;
@@ -30,6 +44,7 @@ export interface Payment {
   // still pending/overdue ("partial" is derived, never a status value).
   paidAmount: number;
   receipts: PaymentReceipt[];
+  claims: PaymentClaim[];
   paidAt: string | null;
   paidBy: string | null;
   paymentMethod: PaymentMethod | null;
@@ -122,6 +137,25 @@ export async function recordReceipts(body: {
 export async function listCredits(params?: { userId?: string }): Promise<UserCreditBalance[]> {
   const r = await api.get<{ credits: UserCreditBalance[] }>('/payments/credits', { params });
   return r.data.credits ?? [];
+}
+
+/** Resident: submit an "I paid" claim (responsible payer only). */
+export async function submitClaim(
+  paymentId: string,
+  body: { amount: number; method?: Exclude<PaymentMethod, 'credit'>; externalRef?: string; note?: string },
+): Promise<Payment> {
+  const r = await api.post<{ payment: Payment }>(`/payments/${paymentId}/claims`, body);
+  return r.data.payment;
+}
+
+/** Admin (or rent-owner): approve/reject a claim. Approval books a receipt. */
+export async function reviewClaim(
+  paymentId: string,
+  claimId: string,
+  action: 'approve' | 'reject',
+): Promise<Payment> {
+  const r = await api.post<{ payment: Payment }>(`/payments/${paymentId}/claims/${claimId}/review`, { action });
+  return r.data.payment;
 }
 
 /** Admin-only: generate this month's dues for every unit. */

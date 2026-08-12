@@ -467,6 +467,17 @@ function NeedsAttention({ summary, currency }: { summary: DashboardSummary; curr
               : t('dash_needs_overdue_no_units')
           }
         />
+        {summary.pendingClaims > 0 && (
+          <>
+            <Divider />
+            <ActivityRow
+              iconName="payments"
+              tone="accent"
+              title={tf('dash_needs_claims', { count: summary.pendingClaims })}
+              subtitle={t('dash_hint_attention')}
+            />
+          </>
+        )}
         <Divider />
         <ActivityRow
           iconName="maintenance"

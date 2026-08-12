@@ -53,6 +53,7 @@ router.get(
       totalUnits,
       openTickets,
       openPolls,
+      pendingClaims,
       activeResidents,
       recentUsers,
     ] = await Promise.all([
@@ -131,6 +132,7 @@ router.get(
         ...(isAdmin ? {} : { filedBy: me.sub }),
       }),
       Poll.countDocuments({ buildingId, status: 'open' }),
+      Payment.countDocuments({ ...scope, claims: { $elemMatch: { status: 'pending' } } }),
       isAdmin
         ? User.countDocuments({
             memberships: { $elemMatch: { buildingId } },
@@ -190,6 +192,7 @@ router.get(
         activeResidents,
         openTickets,
         openPolls,
+        pendingClaims,
         nextDue: nextDue
           ? {
               remaining: round2(nextDue.amount - (nextDue.paidAmount ?? 0)),
