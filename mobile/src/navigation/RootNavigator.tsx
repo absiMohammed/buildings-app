@@ -29,6 +29,7 @@ import { AllUsersPage } from '../pages/AllUsersPage';
 import { AdminPricingPage } from '../pages/AdminPricingPage';
 import { AdminPaymentsPage } from '../pages/AdminPaymentsPage';
 import { UsersPage } from '../pages/UsersPage';
+import { CreditsPage } from '../pages/CreditsPage';
 import { SettingsPage } from '../pages/SettingsPage';
 import type { AppStackParamList, AuthStackParamList, MainTabParamList } from './types';
 import { BottomTabBar } from '../components/BottomTabBar';
@@ -205,6 +206,14 @@ function UsersStackScreen() {
         {() => (
           <RoleGate module={MODULES.USERS}>
             <UsersPage />
+          </RoleGate>
+        )}
+      </UsersStack.Screen>
+      {/* Credit balances — building-admin drill-in from the roster. */}
+      <UsersStack.Screen name="Credits" options={{ title: t('credits_title') }}>
+        {() => (
+          <RoleGate module={MODULES.USERS}>
+            <CreditsPage />
           </RoleGate>
         )}
       </UsersStack.Screen>

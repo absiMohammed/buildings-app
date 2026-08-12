@@ -7,6 +7,7 @@ import { Payment } from '../models/Payment.js';
 import { Unit } from '../models/Unit.js';
 import { UserCredit } from '../models/UserCredit.js';
 import { Notification } from '../models/Notification.js';
+import { CreditLedger } from '../models/CreditLedger.js';
 import { User } from '../models/User.js';
 import { derivePayer, generateMonthlyDues, recordReceipts, round2 } from '../services/payments.service.js';
 import { Forbidden, NotFound, BadRequest } from '../utils/errors.js';
@@ -81,6 +82,75 @@ router.get(
     }
     const credits = await UserCredit.find(filter).select('userId balance currency');
     res.json({ credits });
+  })
+);
+
+// Credit movement history. Registered before GET /:id like /credits.
+router.get(
+  '/credits/ledger',
+  asyncHandler(async (req, res) => {
+    const me = (req as AuthedRequest).user;
+    if (!me.buildingId) throw Forbidden('Building context required');
+    const filter: Record<string, unknown> = { buildingId: me.buildingId };
+    if (me.isBuildingAdmin) {
+      const { userId } = req.query as Record<string, string | undefined>;
+      if (userId) filter.userId = userId;
+    } else {
+      filter.userId = me.sub;
+    }
+    const entries = await CreditLedger.find(filter).sort({ createdAt: -1 }).limit(100);
+    res.json({ entries });
+  })
+);
+
+const adjustCreditSchema = z.object({
+  userId: z.string(),
+  // Positive grants credit, negative deducts (bounded by the balance).
+  delta: z.number().refine((n) => n !== 0, 'delta must be non-zero'),
+  note: z.string().max(300).optional(),
+});
+
+// Manual credit adjustment — building admin only. Deductions are guarded so
+// the balance can never go negative under concurrency.
+router.post(
+  '/credits/adjust',
+  requireBuildingAdmin,
+  validate(adjustCreditSchema),
+  asyncHandler(async (req, res) => {
+    const me = (req as AuthedRequest).user;
+    if (!me.buildingId) throw Forbidden('Building context required');
+    const body = req.body as z.infer<typeof adjustCreditSchema>;
+    const delta = round2(body.delta);
+    const target = await User.findOne({
+      _id: body.userId,
+      memberships: { $elemMatch: { buildingId: me.buildingId } },
+    }).select('_id');
+    if (!target) throw NotFound('User not found in this building');
+
+    let credit;
+    if (delta > 0) {
+      credit = await UserCredit.findOneAndUpdate(
+        { userId: body.userId, buildingId: me.buildingId },
+        { $inc: { balance: delta } },
+        { upsert: true, new: true }
+      );
+    } else {
+      credit = await UserCredit.findOneAndUpdate(
+        { userId: body.userId, buildingId: me.buildingId, balance: { $gte: -delta } },
+        { $inc: { balance: delta } },
+        { new: true }
+      );
+      if (!credit) throw BadRequest('Insufficient credit balance for this deduction.');
+    }
+    await CreditLedger.create({
+      userId: body.userId,
+      buildingId: me.buildingId,
+      delta,
+      reason: 'manual',
+      byUserId: me.sub,
+      note: body.note ?? '',
+    });
+    res.json({ credit });
   })
 );
 

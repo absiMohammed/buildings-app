@@ -20,6 +20,7 @@ export type AppStackParamList = {
   Documents: undefined;
   Units: undefined;
   UnitDetail: { unitNumber: string };
+  Credits: undefined;
   Users: undefined;
   MyHousehold: undefined;
   Buildings: undefined;

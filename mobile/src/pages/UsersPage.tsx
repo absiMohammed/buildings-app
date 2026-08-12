@@ -13,6 +13,7 @@ import {
   type FilterValue,
 } from '../components/ListChrome';
 import { BottomSheet } from '../components/BottomSheet';
+import { Icon } from '../components/Icon';
 import {
   listUsers,
   setUserStatus,
@@ -25,12 +26,15 @@ import {
 import { listUnits } from '../api/units';
 import { useApiResource } from '../api/useApiResource';
 import type { Role } from '../auth/AuthContext';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useAuth } from '../auth/AuthContext';
 import { ACTIONS, hasAction } from '../auth/capabilities';
 import { InviteModal } from '../components/InviteModal';
 import { UserSettingsModal } from '../components/UserSettingsModal';
 import { CreateUserModal } from '../components/CreateUserModal';
 import { useConfirm } from '../components/ConfirmProvider';
+import type { AppStackParamList } from '../navigation/types';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 
@@ -66,6 +70,7 @@ const BUILDING_ROLES: Role[] = ['owner', 'renter', 'dependent', 'independent'];
 const STATUSES: BuildingUser['status'][] = ['active', 'invited', 'suspended'];
 
 export function UsersPage() {
+  const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
   const { user, building, capabilities: caps } = useAuth();
   const canInvite = hasAction(caps, ACTIONS.USER_INVITE);
   const canManage = hasAction(caps, ACTIONS.USER_MANAGE);
@@ -281,6 +286,20 @@ export function UsersPage() {
         onAdd={canInvite ? () => setInviteOpen(true) : undefined}
         addA11yLabel={t('new_invite')}
       />
+
+      {canManage && (
+        <TouchableOpacity
+          style={styles.creditsLink}
+          activeOpacity={0.85}
+          onPress={() => navigation.navigate('Credits')}
+        >
+          <Icon name="payments" size={16} color={palette.accent} />
+          <Text style={styles.creditsLinkText}>{t('credits_title')}</Text>
+          <View style={styles.creditsChevron}>
+            <Icon name="chevronDown" size={14} color={palette.accent} />
+          </View>
+        </TouchableOpacity>
+      )}
 
       {error && (
         <View style={styles.errorBox}>
@@ -550,6 +569,16 @@ export function UsersPage() {
 }
 
 const styles = StyleSheet.create({
+  creditsLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    paddingVertical: 6,
+    marginBottom: spacing.sm,
+  },
+  creditsLinkText: { color: palette.accent, fontWeight: '700', fontSize: 13 },
+  creditsChevron: { transform: [{ rotate: '-90deg' }] },
   container: { flex: 1, backgroundColor: palette.bg },
   scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },

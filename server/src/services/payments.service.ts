@@ -3,6 +3,7 @@ import { Building } from '../models/Building.js';
 import { Unit, type UnitDoc } from '../models/Unit.js';
 import { Payment, type PaymentDoc } from '../models/Payment.js';
 import { UserCredit } from '../models/UserCredit.js';
+import { CreditLedger } from '../models/CreditLedger.js';
 import { Notification } from '../models/Notification.js';
 import { User } from '../models/User.js';
 import { sendWhatsApp } from './whatsapp.service.js';
@@ -170,6 +171,14 @@ export async function recordReceipts(input: RecordReceiptsInput) {
       { $inc: { balance: surplus }, $setOnInsert: { currency: first.currency } },
       { upsert: true }
     );
+    await CreditLedger.create({
+      userId: payerId,
+      buildingId,
+      delta: surplus,
+      reason: 'surplus',
+      paymentId: first._id,
+      byUserId: me.sub,
+    });
     surplusResult = { amount: surplus, userId: payerId.toString() };
   }
 
@@ -198,6 +207,15 @@ export async function applyCreditToCharge(payment: PaymentDoc, unit: UnitDoc): P
       { $inc: { balance: -take } }
     );
     if (!deducted) continue; // concurrent spend — re-read once, then give up
+
+    await CreditLedger.create({
+      userId: payerId,
+      buildingId: payment.buildingId,
+      delta: -take,
+      reason: 'auto_apply',
+      paymentId: payment._id,
+      byUserId: null,
+    });
 
     payment.receipts.push({
       amount: take,

@@ -139,6 +139,33 @@ export async function listCredits(params?: { userId?: string }): Promise<UserCre
   return r.data.credits ?? [];
 }
 
+export interface CreditLedgerEntry {
+  _id: string;
+  userId: string;
+  delta: number;
+  reason: 'surplus' | 'auto_apply' | 'manual';
+  paymentId: string | null;
+  byUserId: string | null;
+  note: string;
+  createdAt: string;
+}
+
+/** Credit movement history — admin sees the building, members their own. */
+export async function listCreditLedger(params?: { userId?: string }): Promise<CreditLedgerEntry[]> {
+  const r = await api.get<{ entries: CreditLedgerEntry[] }>('/payments/credits/ledger', { params });
+  return r.data.entries ?? [];
+}
+
+/** Admin-only: grant (+) or deduct (−) credit manually. */
+export async function adjustCredit(body: {
+  userId: string;
+  delta: number;
+  note?: string;
+}): Promise<UserCreditBalance> {
+  const r = await api.post<{ credit: UserCreditBalance }>('/payments/credits/adjust', body);
+  return r.data.credit;
+}
+
 /** Resident: submit an "I paid" claim (responsible payer only). */
 export async function submitClaim(
   paymentId: string,
