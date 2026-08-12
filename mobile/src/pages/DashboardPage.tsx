@@ -29,11 +29,9 @@ import {
 } from '../components/ui';
 import { StatsBoard, type StatsBoardRow } from '../components/StatsBoard';
 import { fmtDate, fmtMoney, fmtMoneyCompact, fmtMonthShort, relativeDay } from '../utils/format';
-import { listPayments, remainingOf, type Payment } from '../api/payments';
-import { listUnits, type Unit } from '../api/units';
+import { paymentTypeLabel } from '../utils/labels';
+import { getDashboardSummary, type DashboardSummary, type DashboardTrendPoint } from '../api/dashboard';
 import { listPolls, type Poll } from '../api/polls';
-import { listMaintenance, type MaintenanceRequest } from '../api/maintenance';
-import { listUsers, type BuildingUser } from '../api/users';
 import { useApiResource } from '../api/useApiResource';
 import type { AppStackParamList } from '../navigation/types';
 import { useI18n } from '../i18n';
@@ -57,30 +55,13 @@ export function DashboardPage() {
 }
 
 interface DashboardData {
-  payments: Payment[];
-  units: Unit[];
+  summary: DashboardSummary;
   polls: Poll[];
-  tickets: MaintenanceRequest[];
-  users: BuildingUser[];
 }
 
-/** Sum of paid payments per month, last 6 months, for the trend charts. */
-function buildTrend(payments: Payment[]): { label: string; value: number }[] {
-  const now = new Date();
-  const buckets: { label: string; value: number }[] = [];
-  for (let i = 5; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const label = fmtMonthShort(d);
-    const value = payments
-      .filter((p) => {
-        if (p.status !== 'paid' || !p.paidAt) return false;
-        const pd = new Date(p.paidAt);
-        return pd.getFullYear() === d.getFullYear() && pd.getMonth() === d.getMonth();
-      })
-      .reduce((s, p) => s + p.amount, 0);
-    buckets.push({ label, value });
-  }
-  return buckets;
+/** Localized axis labels for the server's 6 trend buckets. */
+function trendWithLabels(trend: DashboardTrendPoint[]): { label: string; value: number }[] {
+  return trend.map((b) => ({ label: fmtMonthShort(new Date(b.year, b.month - 1, 1)), value: b.value }));
 }
 
 function ResidentDashboard({ role }: { role: Role }) {
@@ -89,69 +70,31 @@ function ResidentDashboard({ role }: { role: Role }) {
   const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
   const { t, tf, locale } = useI18n();
 
-  // The recent-activity widget needs the (admin-only) user roster; only
-  // fetch it when the viewer's capability set includes that section.
-  const wantsUsers = hasWidget(caps, WIDGETS.SECTION_RECENT_ACTIVITY);
+  // Building admins in OWNER view (no mark-paid capability) get the same
+  // unit-scoped numbers a plain owner sees — the server handles both via
+  // ?scope (the view toggle is client-side; the token still says admin).
+  const canManagePayments = hasAction(caps, ACTIONS.PAYMENT_MARK_PAID);
   const fetcher = useCallback(async (): Promise<DashboardData> => {
-    const [payments, units, polls, tickets] = await Promise.all([
-      listPayments(),
-      listUnits().catch(() => [] as Unit[]),
+    const [summary, polls] = await Promise.all([
+      getDashboardSummary(canManagePayments ? undefined : { scope: 'mine' }),
       listPolls(),
-      listMaintenance(),
     ]);
-    let users: BuildingUser[] = [];
-    if (wantsUsers) users = await listUsers().catch(() => [] as BuildingUser[]);
-    return { payments, units, polls, tickets, users };
-  }, [wantsUsers]);
+    return { summary, polls };
+  }, [canManagePayments]);
 
   const { data, loading, refreshing, error, refresh } = useApiResource(fetcher, t('dash_err_load'));
 
-  // Building admins receive building-wide payments from the server; in
-  // OWNER view (no mark-paid capability) narrow the stats to their own
-  // unit(s) so the dashboard reads like any other owner's.
-  const canManagePayments = hasAction(caps, ACTIONS.PAYMENT_MARK_PAID);
-  const payments = useMemo(() => {
-    const list = data?.payments ?? [];
-    if (canManagePayments) return list;
-    const mine = new Set(
-      [...(user?.units?.map((u) => u._id) ?? []), user?.unit?._id].filter(Boolean) as string[],
-    );
-    return list.filter((p) => mine.has(p.unitId));
-  }, [data, canManagePayments, user]);
-  const units = useMemo(() => data?.units ?? [], [data]);
+  const summary = data?.summary ?? null;
   const polls = useMemo(() => data?.polls ?? [], [data]);
-  const tickets = useMemo(() => data?.tickets ?? [], [data]);
-  const users = useMemo(() => data?.users ?? [], [data]);
-  const trend = useMemo(() => buildTrend(payments), [payments]);
+  const trend = useMemo(() => trendWithLabels(summary?.trend ?? []), [summary]);
 
-  const outstanding = payments.filter((p) => p.status === 'pending' || p.status === 'overdue');
-  const overdue = payments.filter((p) => p.status === 'overdue');
-  const balance = outstanding.reduce((s, p) => s + remainingOf(p), 0);
-  const now = new Date();
-  // Receipts count partial collections; legacy paid rows (no receipts) fall
-  // back to their single settle date/amount.
-  const collectedMTD = payments.reduce((s, p) => {
-    if (p.receipts?.length) {
-      return (
-        s +
-        p.receipts
-          .filter((r) => {
-            const d = new Date(r.at);
-            return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-          })
-          .reduce((rs, r) => rs + r.amount, 0)
-      );
-    }
-    if (p.status === 'paid' && p.paidAt) {
-      const d = new Date(p.paidAt);
-      if (d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()) return s + p.amount;
-    }
-    return s;
-  }, 0);
-  const openPolls = polls.filter((p) => p.status === 'open').length;
-  const openTickets = tickets.filter((tk) => tk.status === 'open' || tk.status === 'in_progress').length;
-  const occupiedUnits = units.filter((u) => u.occupants.length > 0).length;
-  const nextDue = [...outstanding].sort((a, b) => +new Date(a.dueDate) - +new Date(b.dueDate))[0];
+  const balance = summary?.balance ?? 0;
+  const overdue = summary?.overdue ?? { count: 0, amount: 0 };
+  const collectedMTD = summary?.collectedMTD ?? 0;
+  const openPolls = summary?.openPolls ?? 0;
+  const openTickets = summary?.openTickets ?? 0;
+  const occupiedUnits = summary?.occupiedUnits ?? 0;
+  const nextDue = summary?.nextDue ?? null;
 
   const onRefresh = useCallback(() => {
     void refresh();
@@ -162,13 +105,13 @@ function ResidentDashboard({ role }: { role: Role }) {
   // balance and next due. Dependents get polls + their unit.
   const heroTiles: React.ReactNode[] = [];
   if (hasWidget(caps, WIDGETS.STAT_OUTSTANDING)) {
-    heroTiles.push(<StatCard key="out" label={t('payments_summary_overdue')} value={fmtMoneyCompact(overdue.reduce((s, p) => s + remainingOf(p), 0), currency)} hint={overdue.length > 0 ? tf('dash_hint_overdue', { count: overdue.length }) : t('dash_hint_on_track')} tone={overdue.length > 0 ? 'danger' : 'neutral'} style={styles.heroTile} />);
+    heroTiles.push(<StatCard key="out" label={t('payments_summary_overdue')} value={fmtMoneyCompact(overdue.amount, currency)} hint={overdue.count > 0 ? tf('dash_hint_overdue', { count: overdue.count }) : t('dash_hint_on_track')} tone={overdue.count > 0 ? 'danger' : 'neutral'} style={styles.heroTile} />);
   }
   if (hasWidget(caps, WIDGETS.STAT_MTD_COLLECTED)) {
     heroTiles.push(<StatCard key="mtd" label={t('dash_stat_collected_mtd')} value={fmtMoneyCompact(collectedMTD, currency)} hint={t('dash_hint_this_month')} tone="positive" style={styles.heroTile} />);
   }
   if (hasWidget(caps, WIDGETS.STAT_BALANCE)) {
-    heroTiles.push(<StatCard key="bal" label={t('dash_stat_balance')} value={fmtMoneyCompact(balance, currency)} hint={overdue.length > 0 ? tf('dash_hint_overdue', { count: overdue.length }) : t('dash_hint_on_track')} tone={overdue.length > 0 ? 'danger' : 'positive'} style={styles.heroTile} />);
+    heroTiles.push(<StatCard key="bal" label={t('dash_stat_balance')} value={fmtMoneyCompact(balance, currency)} hint={overdue.count > 0 ? tf('dash_hint_overdue', { count: overdue.count }) : t('dash_hint_on_track')} tone={overdue.count > 0 ? 'danger' : 'positive'} style={styles.heroTile} />);
   }
   if (hasWidget(caps, WIDGETS.STAT_NEXT_DUE)) {
     heroTiles.push(<StatCard key="next" label={t('dash_stat_next_due')} value={nextDue ? relativeDay(nextDue.dueDate) : '—'} hint={nextDue ? fmtDate(nextDue.dueDate) : t('dash_hint_clear')} tone={nextDue ? 'warning' : 'neutral'} style={styles.heroTile} />);
@@ -181,25 +124,16 @@ function ResidentDashboard({ role }: { role: Role }) {
   }
 
   // ── Numbers board: 2-column grid + collection-rate progress ───────────
-  const paidTotal = payments.reduce(
-    (s, p) => s + (p.status === 'paid' ? p.amount : (p.paidAmount ?? 0)),
-    0,
-  );
-  const totalRecorded = payments.filter((p) => p.status !== 'waived').reduce((s, p) => s + p.amount, 0);
-  const unitsWithDebt = new Set(outstanding.map((p) => p.unitId)).size;
-  const activeResidents = users.filter((u) => u.status === 'active').length;
-  const paidYTD = payments.reduce((s, p) => {
-    if (p.receipts?.length) {
-      return s + p.receipts.filter((r) => new Date(r.at).getFullYear() === now.getFullYear()).reduce((rs, r) => rs + r.amount, 0);
-    }
-    if (p.status === 'paid' && p.paidAt && new Date(p.paidAt).getFullYear() === now.getFullYear()) return s + p.amount;
-    return s;
-  }, 0);
+  const paidTotal = summary?.paidTotal ?? 0;
+  const totalRecorded = summary?.totalRecorded ?? 0;
+  const unitsWithDebt = summary?.unitsWithDebt ?? 0;
+  const activeResidents = summary?.activeResidents ?? 0;
+  const paidYTD = summary?.paidYTD ?? 0;
   const myUnitsCount = user?.units?.length ?? (user?.unit ? 1 : 0);
 
   const boardRows: StatsBoardRow[] = [];
   if (hasWidget(caps, WIDGETS.STAT_ACTIVE_UNITS)) {
-    boardRows.push({ id: 'units', icon: 'units', tone: 'accent', label: t('dash_stat_active_units'), value: String(occupiedUnits), caption: tf('dash_hint_of_total', { count: units.length }) });
+    boardRows.push({ id: 'units', icon: 'units', tone: 'accent', label: t('dash_stat_active_units'), value: String(occupiedUnits), caption: tf('dash_hint_of_total', { count: summary?.totalUnits ?? 0 }) });
   }
   if (hasWidget(caps, WIDGETS.STAT_RESIDENTS)) {
     boardRows.push({ id: 'residents', icon: 'users', tone: 'accent', label: t('dash_stat_residents'), value: String(activeResidents), caption: tf('dash_hint_with_debt', { count: unitsWithDebt }) });
@@ -208,7 +142,7 @@ function ResidentDashboard({ role }: { role: Role }) {
     boardRows.push({ id: 'collected', icon: 'payments', tone: 'positive', label: t('dash_stat_collected_total'), value: fmtMoneyCompact(paidTotal, currency), caption: tf('dash_hint_of_recorded', { amount: fmtMoneyCompact(totalRecorded, currency) }) });
   }
   if (hasWidget(caps, WIDGETS.STAT_OUTSTANDING)) {
-    boardRows.push({ id: 'outstanding', icon: 'expenses', tone: overdue.length > 0 ? 'danger' : 'neutral', label: t('dash_stat_outstanding'), value: fmtMoneyCompact(balance, currency), caption: overdue.length > 0 ? tf('dash_hint_overdue', { count: overdue.length }) : t('dash_hint_on_track') });
+    boardRows.push({ id: 'outstanding', icon: 'expenses', tone: overdue.count > 0 ? 'danger' : 'neutral', label: t('dash_stat_outstanding'), value: fmtMoneyCompact(balance, currency), caption: overdue.count > 0 ? tf('dash_hint_overdue', { count: overdue.count }) : t('dash_hint_on_track') });
   }
   if (hasWidget(caps, WIDGETS.STAT_MY_UNITS)) {
     boardRows.push({ id: 'my-units', icon: 'units', tone: 'accent', label: t('dash_stat_my_units'), value: String(myUnitsCount) });
@@ -329,7 +263,7 @@ function ResidentDashboard({ role }: { role: Role }) {
         <>
           <SectionHeader title={t('dash_section_by_category')} />
           <Card>
-            <PaymentsByCategoryChart currency={currency} payments={payments} />
+            <PaymentsByCategoryChart currency={currency} byType={summary?.byType ?? {}} />
           </Card>
         </>
       )}
@@ -351,9 +285,9 @@ function ResidentDashboard({ role }: { role: Role }) {
       )}
 
       {/* Secondary role sections */}
-      {hasWidget(caps, WIDGETS.SECTION_NEEDS_ATTENTION) && <NeedsAttention tickets={tickets} payments={payments} currency={currency} />}
-      {hasWidget(caps, WIDGETS.SECTION_RECENT_ACTIVITY) && <RecentActivity users={users} />}
-      {hasWidget(caps, WIDGETS.SECTION_PAYMENT_SUMMARY) && <PaymentSummary nextDue={nextDue} overdue={overdue.length} outstanding={outstanding.length} balance={balance} currency={currency} />}
+      {hasWidget(caps, WIDGETS.SECTION_NEEDS_ATTENTION) && summary && <NeedsAttention summary={summary} currency={currency} />}
+      {hasWidget(caps, WIDGETS.SECTION_RECENT_ACTIVITY) && <RecentActivity users={summary?.recentUsers ?? []} />}
+      {hasWidget(caps, WIDGETS.SECTION_PAYMENT_SUMMARY) && <PaymentSummary nextDue={nextDue} overdue={overdue.count} outstanding={(summary?.pendingCount ?? 0) + overdue.count} balance={balance} currency={currency} />}
       {hasWidget(caps, WIDGETS.SECTION_OPEN_POLLS) && <DependentSection polls={polls} />}
 
       <View style={{ height: spacing.xl }} />
@@ -436,15 +370,13 @@ function CollectionsChart({ trend, currency }: { trend: { label: string; value: 
   );
 }
 
-function PaymentsByCategoryChart({ currency, payments }: { currency: string; payments: Payment[] }) {
+function PaymentsByCategoryChart({ currency, byType }: { currency: string; byType: DashboardSummary['byType'] }) {
   const { t } = useI18n();
-  // Break the building's real payments down by type.
-  const sumByType = (type: Payment['type']) =>
-    payments.filter((p) => p.type === type).reduce((s, p) => s + p.amount, 0);
+  // Money-in by charge type, straight from the summary aggregation.
   const data = [
-    { value: sumByType('monthly_dues'), text: t('dash_legend_dues'), color: palette.warning },
-    { value: sumByType('expense_split'), text: t('dash_legend_util'), color: palette.success },
-    { value: sumByType('one_off'), text: t('dash_legend_special'), color: palette.accent },
+    { value: byType.monthly_dues ?? 0, text: t('dash_legend_dues'), color: palette.warning },
+    { value: byType.expense_split ?? 0, text: t('dash_legend_util'), color: palette.success },
+    { value: (byType.one_off ?? 0) + (byType.rent ?? 0), text: t('dash_legend_special'), color: palette.accent },
   ].filter((d) => d.value > 0);
   const total = data.reduce((s, d) => s + d.value, 0);
   return (
@@ -513,9 +445,8 @@ function PollsChart({ polls }: { polls: Poll[] }) {
   );
 }
 
-function NeedsAttention({ tickets, payments, currency }: { tickets: MaintenanceRequest[]; payments: Payment[]; currency: string }) {
+function NeedsAttention({ summary, currency }: { summary: DashboardSummary; currency: string }) {
   const { t, tf } = useI18n();
-  const overduePayments = payments.filter((p) => p.status === 'overdue');
   return (
     <>
       <SectionHeader title={t('dash_section_needs_attention')} />
@@ -524,14 +455,14 @@ function NeedsAttention({ tickets, payments, currency }: { tickets: MaintenanceR
           iconName="payments"
           tone="danger"
           title={tf(
-            overduePayments.length === 1 ? 'dash_needs_overdue_title' : 'dash_needs_overdue_title_plural',
-            { count: overduePayments.length }
+            summary.overdue.count === 1 ? 'dash_needs_overdue_title' : 'dash_needs_overdue_title_plural',
+            { count: summary.overdue.count }
           )}
           subtitle={
-            overduePayments.length > 0
+            summary.overdue.count > 0
               ? tf('dash_needs_overdue_subtitle', {
-                  amount: fmtMoney(overduePayments.reduce((s, p) => s + remainingOf(p), 0), currency),
-                  units: String(new Set(overduePayments.map((p) => p.unitId)).size),
+                  amount: fmtMoney(summary.overdue.amount, currency),
+                  units: String(summary.unitsWithDebt),
                 })
               : t('dash_needs_overdue_no_units')
           }
@@ -540,16 +471,15 @@ function NeedsAttention({ tickets, payments, currency }: { tickets: MaintenanceR
         <ActivityRow
           iconName="maintenance"
           tone="warning"
-          title={tf('dash_needs_new_tickets', { count: tickets.filter((tk) => tk.status === 'open').length })}
-          subtitle={tickets[0] ? tickets[0].title : t('dash_needs_no_tickets')}
+          title={tf('dash_needs_new_tickets', { count: summary.openTickets })}
+          subtitle={summary.openTickets > 0 ? t('dash_hint_attention') : t('dash_needs_no_tickets')}
         />
-
       </Card>
     </>
   );
 }
 
-function RecentActivity({ users }: { users: BuildingUser[] }) {
+function RecentActivity({ users }: { users: DashboardSummary['recentUsers'] }) {
   const { t } = useI18n();
   return (
     <>
@@ -578,7 +508,7 @@ function RecentActivity({ users }: { users: BuildingUser[] }) {
   );
 }
 
-function PaymentSummary({ nextDue, overdue, outstanding, balance, currency }: { nextDue?: Payment; overdue: number; outstanding: number; balance: number; currency: string }) {
+function PaymentSummary({ nextDue, overdue, outstanding, balance, currency }: { nextDue: DashboardSummary['nextDue']; overdue: number; outstanding: number; balance: number; currency: string }) {
   const { t, tf } = useI18n();
   return (
     <>
@@ -589,15 +519,9 @@ function PaymentSummary({ nextDue, overdue, outstanding, balance, currency }: { 
             <View style={styles.nextRow}>
               <View>
                 <Text style={type.caption}>{tf('dash_due', { relative: relativeDay(nextDue.dueDate) })}</Text>
-                <Text style={[type.display, { marginTop: 4 }]}>{fmtMoney(remainingOf(nextDue), currency)}</Text>
+                <Text style={[type.display, { marginTop: 4 }]}>{fmtMoney(nextDue.remaining, currency)}</Text>
                 <Text style={[type.small, { marginTop: 2 }]}>
-                  {t(
-                    nextDue.type === 'monthly_dues'
-                      ? 'ptype_building_dues'
-                      : nextDue.type === 'expense_split'
-                        ? 'ptype_utilities'
-                        : 'ptype_special',
-                  )}
+                  {paymentTypeLabel(t, nextDue.type)}
                 </Text>
               </View>
               <Pill
