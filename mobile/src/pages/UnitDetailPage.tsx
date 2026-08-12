@@ -1,24 +1,35 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   RefreshControl,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
-  TouchableOpacity,
   View,
 } from 'react-native';
 import { BarChart } from 'react-native-gifted-charts';
 import { useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
 import { useAuth, useCurrency } from '../auth/AuthContext';
 import { ACTIONS, hasAction } from '../auth/capabilities';
-import { Button, Card, EmptyState, IconCircle, Pill, SectionHeader } from '../components/ui';
+import { Button, Card, EmptyState, IconCircle, Pill, SectionHeader, StatTile, Legend } from '../components/ui';
 import { type IconName } from '../components/Icon';
-import { palette, radii, shadow, spacing, type, textStart } from '../components/theme';
-import { fmtMoney, fmtMoneyCompact, relativeDay } from '../utils/format';
+import { palette, radii, spacing, type, textStart } from '../components/theme';
+import { fmtDate, fmtMoney, fmtMoneyCompact, fmtMonthShort, relativeDay } from '../utils/format';
+import { paymentMethodLabel, paymentTypeLabel } from '../utils/labels';
 import { listUnits, updateUnit, type Unit } from '../api/units';
-import { createPayment, listPayments, updatePayment, type Payment } from '../api/payments';
-import { useApiResource } from '../api/useApiResource';
+import {
+  createPayment,
+  isPartiallyPaid,
+  listCredits,
+  listPayments,
+  recordReceipts,
+  remainingOf,
+  type Payment,
+  type UserCreditBalance,
+} from '../api/payments';
+import { apiErrorMessage, useApiResource } from '../api/useApiResource';
 import { RecordPaymentModal } from '../components/RecordPaymentModal';
 import { BottomSheet } from '../components/BottomSheet';
 import type { AppStackParamList } from '../navigation/types';
@@ -27,16 +38,7 @@ import { useI18n } from '../i18n';
 interface UnitDetailData {
   units: Unit[];
   payments: Payment[];
-}
-
-// Reuse the existing dues label where it maps; otherwise prettify the raw type.
-function paymentTypeLabel(pt: Payment['type'], t: ReturnType<typeof useI18n>['t']): string {
-  if (pt === 'monthly_dues') return t('ptype_building_dues');
-  if (pt === 'rent') return t('ptype_rent');
-  return pt
-    .split('_')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
+  credits: UserCreditBalance[];
 }
 
 function paymentIcon(pt: Payment['type']): IconName {
@@ -67,7 +69,7 @@ function groupByMonth(payments: Payment[]): MonthBucket[] {
     const d = new Date(p.dueDate);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     const existing = map.get(key);
-    const label = d.toLocaleString('en-US', { month: 'short' });
+    const label = fmtMonthShort(d);
     if (existing) {
       existing.amount += p.amount;
       if (p.status === 'overdue') existing.status = 'overdue';
@@ -99,17 +101,22 @@ export function UnitDetailPage() {
   const [recordOpen, setRecordOpen] = useState(false);
   const [rentModalOpen, setRentModalOpen] = useState(false);
   const [rentChargeOpen, setRentChargeOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   const buildingDuesDay = building?.settings?.monthlyDuesDay ?? 1;
   const buildingDefaultAmount = building?.settings?.defaultMonthlyDues ?? 0;
   const { t, tf } = useI18n();
 
   const fetcher = useCallback(async (): Promise<UnitDetailData> => {
-    const [units, payments] = await Promise.all([listUnits(), listPayments()]);
-    return { units, payments };
+    const [units, payments, credits] = await Promise.all([
+      listUnits(),
+      listPayments(),
+      listCredits().catch(() => [] as UserCreditBalance[]),
+    ]);
+    return { units, payments, credits };
   }, []);
   const { data, loading, refreshing, error, refresh, reload } = useApiResource(
     fetcher,
-    'Could not load unit.'
+    t('unit_err_load')
   );
 
   const unit = useMemo(
@@ -122,32 +129,55 @@ export function UnitDetailPage() {
   );
   const history = useMemo(() => groupByMonth(payments), [payments]);
 
-  async function markSelectedPaid(ids: string[]) {
-    for (const id of ids) {
-      await updatePayment(id, { status: 'paid', paymentMethod: 'cash' });
+  // One guard for every mutation on this page: busy state for the buttons,
+  // surfaced error, silent reload after.
+  async function mutate(run: () => Promise<void>) {
+    setBusy(true);
+    try {
+      await run();
+      await reload();
+    } catch (e) {
+      Alert.alert(apiErrorMessage(e, t('err_generic')));
+    } finally {
+      setBusy(false);
     }
-    setRecordOpen(false);
-    await reload();
+  }
+
+  async function submitReceipt(input: { paymentIds: string[]; amount: number; note: string }) {
+    await mutate(async () => {
+      const { surplus } = await recordReceipts({
+        paymentIds: input.paymentIds,
+        amount: input.amount,
+        paymentMethod: 'cash',
+        note: input.note,
+      });
+      setRecordOpen(false);
+      if (surplus) {
+        Alert.alert(tf('unit_credited_to_balance', { amount: fmtMoney(surplus.amount, currency) }));
+      }
+    });
   }
 
   async function saveRent(amount: number | null) {
     if (!unit) return;
-    await updateUnit(unit._id, { monthlyRentAmount: amount });
-    setRentModalOpen(false);
-    await reload();
+    await mutate(async () => {
+      await updateUnit(unit._id, { monthlyRentAmount: amount });
+      setRentModalOpen(false);
+    });
   }
 
   async function addRentCharge(input: { amount: number; dueDate: string }) {
     if (!unit) return;
-    await createPayment({
-      unitId: unit._id,
-      type: 'rent',
-      amount: input.amount,
-      currency,
-      dueDate: input.dueDate,
+    await mutate(async () => {
+      await createPayment({
+        unitId: unit._id,
+        type: 'rent',
+        amount: input.amount,
+        currency,
+        dueDate: input.dueDate,
+      });
+      setRentChargeOpen(false);
     });
-    setRentChargeOpen(false);
-    await reload();
   }
 
   async function saveDues(amount: number | null, dayOverride: number | null) {
@@ -158,9 +188,10 @@ export function UnitDetailPage() {
       monthlyDuesAmount: amount,
       monthlyDuesDayOverride: dayOverride,
     };
-    await updateUnit(unit._id, patch as Parameters<typeof updateUnit>[1]);
-    setDuesModalOpen(false);
-    await reload();
+    await mutate(async () => {
+      await updateUnit(unit._id, patch as Parameters<typeof updateUnit>[1]);
+      setDuesModalOpen(false);
+    });
   }
 
   if (loading) {
@@ -187,8 +218,17 @@ export function UnitDetailPage() {
   const effectiveAmount = unit.monthlyDuesAmount ?? buildingDefaultAmount;
   const outstanding = payments
     .filter((p) => p.status === 'pending' || p.status === 'overdue')
-    .reduce((s, p) => s + p.amount, 0);
-  const paidTotal = payments.filter((p) => p.status === 'paid').reduce((s, p) => s + p.amount, 0);
+    .reduce((s, p) => s + remainingOf(p), 0);
+  // Everything that actually came in — full settles and partial receipts.
+  const paidTotal = payments.reduce(
+    (s, p) => s + (p.status === 'paid' ? p.amount : (p.paidAmount ?? 0)),
+    0,
+  );
+  // Credit on file for this unit's people (owner + occupants).
+  const unitPeople = new Set([unit.ownerId, ...unit.occupants].filter(Boolean) as string[]);
+  const unitCredit = (data?.credits ?? [])
+    .filter((c) => unitPeople.has(c.userId))
+    .reduce((s, c) => s + c.balance, 0);
   const occupied = unit.occupants.length > 0;
   const openPayments = payments.filter((p) => p.status === 'pending' || p.status === 'overdue');
   // Rent is the OWNER's surface: only the unit's owner sets the amount,
@@ -228,10 +268,20 @@ export function UnitDetailPage() {
 
       {/* Quick stats */}
       <View style={styles.statsRow}>
-        <StatTile label={t('unit_stat_monthly_dues')} value={fmtMoney(effectiveAmount, currency)} tone="accent" />
-        <StatTile label={t('unit_stat_outstanding')} value={fmtMoneyCompact(outstanding, currency)} tone={outstanding > 0 ? 'danger' : 'neutral'} />
-        <StatTile label={t('unit_stat_paid_ytd')} value={fmtMoneyCompact(paidTotal, currency)} tone="positive" />
+        <StatTile style={styles.stat} label={t('unit_stat_monthly_dues')} value={fmtMoney(effectiveAmount, currency)} tone="accent" />
+        <StatTile style={styles.stat} label={t('unit_stat_outstanding')} value={fmtMoneyCompact(outstanding, currency)} tone={outstanding > 0 ? 'danger' : 'neutral'} />
+        {unitCredit > 0 ? (
+          <StatTile style={styles.stat} label={t('unit_stat_credit')} value={fmtMoneyCompact(unitCredit, currency)} tone="accent" />
+        ) : (
+          <StatTile style={styles.stat} label={t('unit_stat_paid_ytd')} value={fmtMoneyCompact(paidTotal, currency)} tone="positive" />
+        )}
       </View>
+
+      {unitCredit > 0 && (
+        <Text style={[type.small, { marginBottom: spacing.md }]}>
+          {tf('unit_credit_on_file', { amount: fmtMoney(unitCredit, currency) })}
+        </Text>
+      )}
 
       {recordablePayments.length > 0 && (
         <View style={styles.cta}>
@@ -317,11 +367,13 @@ export function UnitDetailPage() {
               xAxisColor={palette.border}
               yAxisTextStyle={{ color: palette.textSubtle, fontSize: 10 }}
             />
-            <View style={styles.legendRow}>
-              <Legend color={palette.success} label={t('unit_legend_paid')} />
-              <Legend color={palette.warning} label={t('unit_legend_pending')} />
-              <Legend color={palette.danger} label={t('unit_legend_overdue')} />
-            </View>
+            <Legend
+              items={[
+                { color: palette.success, label: t('unit_legend_paid') },
+                { color: palette.warning, label: t('unit_legend_pending') },
+                { color: palette.danger, label: t('unit_legend_overdue') },
+              ]}
+            />
           </>
         )}
       </Card>
@@ -372,14 +424,34 @@ export function UnitDetailPage() {
                     tone={tone === 'positive' ? 'positive' : tone === 'danger' ? 'danger' : 'accent'}
                   />
                   <View style={{ flex: 1 }}>
-                    <Text style={[type.body, { fontWeight: '600' }]}>{paymentTypeLabel(p.type, t)}</Text>
+                    <Text style={[type.body, { fontWeight: '600' }]}>{paymentTypeLabel(t, p.type)}</Text>
                     <Text style={type.small}>{tf('dash_due', { relative: relativeDay(p.dueDate) })}</Text>
                   </View>
-                  <View style={{ alignItems: 'flex-start' }}>
-                    <Text style={[type.body, { fontWeight: '600' }]}>{fmtMoney(p.amount, currency)}</Text>
+                  <View style={{ alignItems: 'flex-start', gap: 2 }}>
+                    <Text style={[type.body, { fontWeight: '600' }]}>
+                      {fmtMoney(p.status === 'paid' ? p.amount : remainingOf(p), currency)}
+                    </Text>
                     <Pill label={statusLabelText} tone={tone} />
+                    {isPartiallyPaid(p) && (
+                      <Pill
+                        label={tf('record_payment_paid_inline', { amount: fmtMoney(p.paidAmount, currency) })}
+                        tone="accent"
+                      />
+                    )}
                   </View>
                 </View>
+                {/* Receipt history: every installment recorded on this charge. */}
+                {(p.receipts?.length ?? 0) > 0 && (
+                  <View style={styles.receiptList}>
+                    {p.receipts.map((r) => (
+                      <Text key={r._id} style={styles.receiptLine}>
+                        {fmtDate(r.at)} · {paymentMethodLabel(t, r.method)} ·{' '}
+                        {fmtMoney(r.amount, currency)}
+                        {r.note ? ` · ${r.note}` : ''}
+                      </Text>
+                    ))}
+                  </View>
+                )}
                 {i < payments.length - 1 && <View style={styles.divider} />}
               </View>
             );
@@ -395,7 +467,8 @@ export function UnitDetailPage() {
         unitNumber={unit.number}
         currency={currency}
         openPayments={recordablePayments}
-        onSubmit={({ selectedIds }) => void markSelectedPaid(selectedIds)}
+        submitting={busy}
+        onSubmit={(input) => void submitReceipt(input)}
       />
 
       <EditRentModal
@@ -606,13 +679,12 @@ function EditDuesModal({
                 : tf('edit_dues_custom_off', { amount: fmtMoney(buildingDefaultAmount, currency) })}
             </Text>
           </View>
-          <TouchableOpacity
-            onPress={() => setCustomAmount((v) => !v)}
-            style={[modalStyles.switch, customAmount && modalStyles.switchOn]}
-            activeOpacity={0.85}
-          >
-            <View style={[modalStyles.switchKnob, customAmount && modalStyles.switchKnobOn]} />
-          </TouchableOpacity>
+          <Switch
+            value={customAmount}
+            onValueChange={setCustomAmount}
+            trackColor={{ false: palette.border, true: palette.accent }}
+            thumbColor={palette.surface}
+          />
         </View>
 
         {customAmount && (
@@ -638,13 +710,12 @@ function EditDuesModal({
                 : tf('edit_dues_override_off', { day: buildingDay })}
             </Text>
           </View>
-          <TouchableOpacity
-            onPress={() => setUseOverride((v) => !v)}
-            style={[modalStyles.switch, useOverride && modalStyles.switchOn]}
-            activeOpacity={0.85}
-          >
-            <View style={[modalStyles.switchKnob, useOverride && modalStyles.switchKnobOn]} />
-          </TouchableOpacity>
+          <Switch
+            value={useOverride}
+            onValueChange={setUseOverride}
+            trackColor={{ false: palette.border, true: palette.accent }}
+            thumbColor={palette.surface}
+          />
         </View>
 
         {useOverride && (
@@ -676,51 +747,16 @@ function EditDuesModal({
   );
 }
 
-function StatTile({ label, value, tone }: { label: string; value: string; tone: 'accent' | 'positive' | 'warning' | 'danger' | 'neutral' }) {
-  const fg =
-    tone === 'accent' ? palette.accent :
-    tone === 'positive' ? palette.success :
-    tone === 'warning' ? palette.warning :
-    tone === 'danger' ? palette.danger :
-    palette.textMuted;
-  const bg =
-    tone === 'accent' ? palette.accentSoft :
-    tone === 'positive' ? palette.successSoft :
-    tone === 'warning' ? palette.warningSoft :
-    tone === 'danger' ? palette.dangerSoft :
-    palette.surfaceMuted;
-  return (
-    <View style={[styles.statTile, { backgroundColor: bg }]}>
-      <Text style={[styles.statLabel, { color: fg }]}>{label}</Text>
-      <Text style={[styles.statValue, { color: fg }]}>{value}</Text>
-    </View>
-  );
-}
-
-function Legend({ color, label }: { color: string; label: string }) {
-  return (
-    <View style={styles.legendItem}>
-      <View style={[styles.legendDot, { backgroundColor: color }]} />
-      <Text style={type.small}>{label}</Text>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   missing: { flex: 1, justifyContent: 'center', backgroundColor: palette.bg },
   heroRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: spacing.lg },
 
   statsRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md },
-  statTile: { flex: 1, borderRadius: radii.lg, padding: spacing.md, ...shadow },
-  statLabel: { fontSize: 11, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.6 },
-  statValue: { fontSize: 16, fontWeight: '700', marginTop: 4 },
+  stat: { flexBasis: '30%' },
 
-  legendRow: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.md, justifyContent: 'center' },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  legendDot: { width: 10, height: 10, borderRadius: 5 },
 
   residentsHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: spacing.lg, marginBottom: spacing.sm },
   residentsCount: { flexDirection: 'row', alignItems: 'baseline', gap: spacing.sm },
@@ -728,6 +764,8 @@ const styles = StyleSheet.create({
   divider: { height: StyleSheet.hairlineWidth, backgroundColor: palette.divider, marginHorizontal: spacing.lg },
 
   paymentRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
+  receiptList: { paddingHorizontal: spacing.lg, paddingBottom: spacing.md, gap: 2 },
+  receiptLine: { fontSize: 11, color: palette.textSubtle },
   duesRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   cta: { marginBottom: spacing.md },
 });
@@ -745,18 +783,6 @@ const modalStyles = StyleSheet.create({
     backgroundColor: palette.inputBg,    ...textStart,
   },
   toggleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.md },
-  switch: {
-    width: 50,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: palette.surfaceMuted,
-    padding: 2,
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: palette.border,
-  },
-  switchOn: { backgroundColor: palette.accent, borderColor: palette.accent },
-  switchKnob: { width: 22, height: 22, borderRadius: 11, backgroundColor: '#fff' },
   switchKnobOn: { transform: [{ translateX: 22 }] },
   actions: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.lg },
 });

@@ -6,7 +6,6 @@ import {
   Text,
   TouchableOpacity,
   View,
-  useWindowDimensions,
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { BarChart, LineChart, PieChart } from 'react-native-gifted-charts';
@@ -14,14 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useAuth, useCurrency, type Role } from '../auth/AuthContext';
-import {
-  ACTIONS,
-  MODULES,
-  WIDGETS,
-  hasAction,
-  hasModule,
-  hasWidget,
-} from '../auth/capabilities';
+import { ACTIONS, WIDGETS, hasAction, hasWidget } from '../auth/capabilities';
 import { palette, shadow, spacing, type } from '../components/theme';
 import { ViewModeChip } from '../components/ViewModeChip';
 import { AdminDashboardPage } from './AdminDashboardPage';
@@ -32,28 +24,20 @@ import {
   Pill,
   SectionHeader,
   StatCard,
+  Legend,
+  Avatar,
 } from '../components/ui';
-import { fmtMoney, fmtMoneyCompact, relativeDay } from '../utils/format';
-import { listPayments, type Payment } from '../api/payments';
+import { StatsBoard, type StatsBoardRow } from '../components/StatsBoard';
+import { fmtDate, fmtMoney, fmtMoneyCompact, fmtMonthShort, relativeDay } from '../utils/format';
+import { listPayments, remainingOf, type Payment } from '../api/payments';
 import { listUnits, type Unit } from '../api/units';
 import { listPolls, type Poll } from '../api/polls';
 import { listMaintenance, type MaintenanceRequest } from '../api/maintenance';
 import { listUsers, type BuildingUser } from '../api/users';
 import { useApiResource } from '../api/useApiResource';
-import type { AppStackParamList, MainTabParamList } from '../navigation/types';
+import type { AppStackParamList } from '../navigation/types';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
-
-interface ModuleEntry {
-  id: string;
-  icon: IconName;
-  labelKey: StringKey;
-  // A bottom-tab route — tapping the tile switches to that tab's stack. Using
-  // the tab name (not a leaf screen) is what makes cross-section navigation
-  // actually work from the Home tab.
-  route: keyof MainTabParamList;
-  tone: 'accent' | 'positive' | 'warning' | 'danger' | 'neutral';
-}
 
 function roleKey(role: Role): StringKey {
   return role === 'admin' ? 'role_admin'
@@ -62,17 +46,6 @@ function roleKey(role: Role): StringKey {
     : role === 'independent' ? 'role_independent'
     : 'role_dependent';
 }
-
-const MODULE_REGISTRY: ModuleEntry[] = [
-  { id: MODULES.PAYMENTS, icon: 'payments', labelKey: 'nav_payments', route: 'PaymentsTab', tone: 'accent' },
-  { id: MODULES.EXPENSES, icon: 'expenses', labelKey: 'nav_expenses', route: 'ExpensesTab', tone: 'warning' },
-  { id: MODULES.POLLS, icon: 'polls', labelKey: 'nav_polls', route: 'PollsTab', tone: 'positive' },
-  { id: MODULES.MAINTENANCE, icon: 'maintenance', labelKey: 'nav_maintenance', route: 'MaintenanceTab', tone: 'warning' },
-  { id: MODULES.DOCUMENTS, icon: 'documents', labelKey: 'nav_documents', route: 'DocumentsTab', tone: 'neutral' },
-  { id: MODULES.UNITS, icon: 'units', labelKey: 'nav_units', route: 'UnitsTab', tone: 'accent' },
-  { id: MODULES.USERS, icon: 'users', labelKey: 'nav_users', route: 'UsersTab', tone: 'neutral' },
-  { id: MODULES.HOUSEHOLD, icon: 'household', labelKey: 'nav_household', route: 'HouseholdTab', tone: 'positive' },
-];
 
 export function DashboardPage() {
   const { user } = useAuth();
@@ -97,7 +70,7 @@ function buildTrend(payments: Payment[]): { label: string; value: number }[] {
   const buckets: { label: string; value: number }[] = [];
   for (let i = 5; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const label = d.toLocaleDateString('en-US', { month: 'short' });
+    const label = fmtMonthShort(d);
     const value = payments
       .filter((p) => {
         if (p.status !== 'paid' || !p.paidAt) return false;
@@ -131,7 +104,7 @@ function ResidentDashboard({ role }: { role: Role }) {
     return { payments, units, polls, tickets, users };
   }, [wantsUsers]);
 
-  const { data, loading, refreshing, error, refresh } = useApiResource(fetcher, 'Could not load your dashboard.');
+  const { data, loading, refreshing, error, refresh } = useApiResource(fetcher, t('dash_err_load'));
 
   // Building admins receive building-wide payments from the server; in
   // OWNER view (no mark-paid capability) narrow the stats to their own
@@ -153,49 +126,107 @@ function ResidentDashboard({ role }: { role: Role }) {
 
   const outstanding = payments.filter((p) => p.status === 'pending' || p.status === 'overdue');
   const overdue = payments.filter((p) => p.status === 'overdue');
-  const balance = outstanding.reduce((s, p) => s + p.amount, 0);
+  const balance = outstanding.reduce((s, p) => s + remainingOf(p), 0);
   const now = new Date();
-  const collectedMTD = payments
-    .filter((p) => p.status === 'paid' && p.paidAt && new Date(p.paidAt).getMonth() === now.getMonth())
-    .reduce((s, p) => s + p.amount, 0);
+  // Receipts count partial collections; legacy paid rows (no receipts) fall
+  // back to their single settle date/amount.
+  const collectedMTD = payments.reduce((s, p) => {
+    if (p.receipts?.length) {
+      return (
+        s +
+        p.receipts
+          .filter((r) => {
+            const d = new Date(r.at);
+            return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+          })
+          .reduce((rs, r) => rs + r.amount, 0)
+      );
+    }
+    if (p.status === 'paid' && p.paidAt) {
+      const d = new Date(p.paidAt);
+      if (d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()) return s + p.amount;
+    }
+    return s;
+  }, 0);
   const openPolls = polls.filter((p) => p.status === 'open').length;
   const openTickets = tickets.filter((tk) => tk.status === 'open' || tk.status === 'in_progress').length;
   const occupiedUnits = units.filter((u) => u.occupants.length > 0).length;
   const nextDue = [...outstanding].sort((a, b) => +new Date(a.dueDate) - +new Date(b.dueDate))[0];
 
-  const allowedModules = MODULE_REGISTRY.filter((m) => hasModule(caps, m.id));
-
   const onRefresh = useCallback(() => {
     void refresh();
   }, [refresh]);
 
-  // Build stat cards from capability list (order matches the WIDGETS const).
-  const statCards: { id: string; node: React.ReactNode }[] = [];
-  if (hasWidget(caps, WIDGETS.STAT_MTD_COLLECTED)) {
-    statCards.push({ id: WIDGETS.STAT_MTD_COLLECTED, node: <StatCard key="mtd" label={t('dash_stat_collected_mtd')} value={fmtMoneyCompact(collectedMTD, currency)} hint={t('dash_hint_this_month')} tone="positive" style={styles.statCard} /> });
-  }
+  // ── Headline tiles: two half-width cards, always fully on screen ──────
+  // Admin leads with money-at-risk vs money-in; residents with their own
+  // balance and next due. Dependents get polls + their unit.
+  const heroTiles: React.ReactNode[] = [];
   if (hasWidget(caps, WIDGETS.STAT_OUTSTANDING)) {
-    statCards.push({ id: WIDGETS.STAT_OUTSTANDING, node: <StatCard key="out" label={t('dash_stat_outstanding')} value={fmtMoneyCompact(balance, currency)} hint={overdue.length > 0 ? tf('dash_hint_overdue', { count: overdue.length }) : t('dash_hint_on_track')} tone={overdue.length > 0 ? 'danger' : 'neutral'} style={styles.statCard} /> });
+    heroTiles.push(<StatCard key="out" label={t('payments_summary_overdue')} value={fmtMoneyCompact(overdue.reduce((s, p) => s + remainingOf(p), 0), currency)} hint={overdue.length > 0 ? tf('dash_hint_overdue', { count: overdue.length }) : t('dash_hint_on_track')} tone={overdue.length > 0 ? 'danger' : 'neutral'} style={styles.heroTile} />);
   }
-  if (hasWidget(caps, WIDGETS.STAT_ACTIVE_UNITS)) {
-    statCards.push({ id: WIDGETS.STAT_ACTIVE_UNITS, node: <StatCard key="units" label={t('dash_stat_active_units')} value={String(occupiedUnits)} hint={tf('dash_hint_of_total', { count: units.length })} tone="accent" style={styles.statCard} /> });
-  }
-  if (hasWidget(caps, WIDGETS.STAT_OPEN_TICKETS)) {
-    statCards.push({ id: WIDGETS.STAT_OPEN_TICKETS, node: <StatCard key="tk" label={t('dash_stat_open_tickets')} value={String(openTickets)} hint={openTickets ? t('dash_hint_attention') : t('dash_hint_clear')} tone={openTickets ? 'warning' : 'neutral'} style={styles.statCard} /> });
+  if (hasWidget(caps, WIDGETS.STAT_MTD_COLLECTED)) {
+    heroTiles.push(<StatCard key="mtd" label={t('dash_stat_collected_mtd')} value={fmtMoneyCompact(collectedMTD, currency)} hint={t('dash_hint_this_month')} tone="positive" style={styles.heroTile} />);
   }
   if (hasWidget(caps, WIDGETS.STAT_BALANCE)) {
-    statCards.push({ id: WIDGETS.STAT_BALANCE, node: <StatCard key="bal" label={t('dash_stat_balance')} value={fmtMoneyCompact(balance, currency)} hint={overdue.length > 0 ? tf('dash_hint_overdue', { count: overdue.length }) : t('dash_hint_on_track')} tone={overdue.length > 0 ? 'danger' : 'positive'} style={styles.statCard} /> });
+    heroTiles.push(<StatCard key="bal" label={t('dash_stat_balance')} value={fmtMoneyCompact(balance, currency)} hint={overdue.length > 0 ? tf('dash_hint_overdue', { count: overdue.length }) : t('dash_hint_on_track')} tone={overdue.length > 0 ? 'danger' : 'positive'} style={styles.heroTile} />);
   }
   if (hasWidget(caps, WIDGETS.STAT_NEXT_DUE)) {
-    statCards.push({ id: WIDGETS.STAT_NEXT_DUE, node: <StatCard key="next" label={t('dash_stat_next_due')} value={nextDue ? relativeDay(nextDue.dueDate) : '—'} hint={nextDue ? new Date(nextDue.dueDate).toLocaleDateString() : t('dash_hint_clear')} tone={nextDue ? 'warning' : 'neutral'} style={styles.statCard} /> });
-  }
-  if (hasWidget(caps, WIDGETS.STAT_OPEN_POLLS)) {
-    statCards.push({ id: WIDGETS.STAT_OPEN_POLLS, node: <StatCard key="polls" label={t('dash_stat_open_polls')} value={String(openPolls)} hint={t('dash_hint_awaiting_votes')} tone="accent" style={styles.statCard} /> });
+    heroTiles.push(<StatCard key="next" label={t('dash_stat_next_due')} value={nextDue ? relativeDay(nextDue.dueDate) : '—'} hint={nextDue ? fmtDate(nextDue.dueDate) : t('dash_hint_clear')} tone={nextDue ? 'warning' : 'neutral'} style={styles.heroTile} />);
   }
   if (hasWidget(caps, WIDGETS.STAT_YOUR_UNIT)) {
-    const myUnit = user?.unit ?? null;
-    statCards.push({ id: WIDGETS.STAT_YOUR_UNIT, node: <StatCard key="unit" label={t('dash_stat_your_unit')} value={myUnit?.number ?? '—'} hint="" tone="neutral" style={styles.statCard} /> });
+    heroTiles.push(<StatCard key="unit" label={t('dash_stat_your_unit')} value={user?.unit?.number ?? '—'} hint="" tone="neutral" style={styles.heroTile} />);
   }
+  if (heroTiles.length < 2 && hasWidget(caps, WIDGETS.STAT_OPEN_POLLS)) {
+    heroTiles.push(<StatCard key="polls-tile" label={t('dash_stat_open_polls')} value={String(openPolls)} hint={t('dash_hint_awaiting_votes')} tone="accent" style={styles.heroTile} />);
+  }
+
+  // ── Numbers board: 2-column grid + collection-rate progress ───────────
+  const paidTotal = payments.reduce(
+    (s, p) => s + (p.status === 'paid' ? p.amount : (p.paidAmount ?? 0)),
+    0,
+  );
+  const totalRecorded = payments.filter((p) => p.status !== 'waived').reduce((s, p) => s + p.amount, 0);
+  const unitsWithDebt = new Set(outstanding.map((p) => p.unitId)).size;
+  const activeResidents = users.filter((u) => u.status === 'active').length;
+  const paidYTD = payments.reduce((s, p) => {
+    if (p.receipts?.length) {
+      return s + p.receipts.filter((r) => new Date(r.at).getFullYear() === now.getFullYear()).reduce((rs, r) => rs + r.amount, 0);
+    }
+    if (p.status === 'paid' && p.paidAt && new Date(p.paidAt).getFullYear() === now.getFullYear()) return s + p.amount;
+    return s;
+  }, 0);
+  const myUnitsCount = user?.units?.length ?? (user?.unit ? 1 : 0);
+
+  const boardRows: StatsBoardRow[] = [];
+  if (hasWidget(caps, WIDGETS.STAT_ACTIVE_UNITS)) {
+    boardRows.push({ id: 'units', icon: 'units', tone: 'accent', label: t('dash_stat_active_units'), value: String(occupiedUnits), caption: tf('dash_hint_of_total', { count: units.length }) });
+  }
+  if (hasWidget(caps, WIDGETS.STAT_RESIDENTS)) {
+    boardRows.push({ id: 'residents', icon: 'users', tone: 'accent', label: t('dash_stat_residents'), value: String(activeResidents), caption: tf('dash_hint_with_debt', { count: unitsWithDebt }) });
+  }
+  if (hasWidget(caps, WIDGETS.STAT_MTD_COLLECTED)) {
+    boardRows.push({ id: 'collected', icon: 'payments', tone: 'positive', label: t('dash_stat_collected_total'), value: fmtMoneyCompact(paidTotal, currency), caption: tf('dash_hint_of_recorded', { amount: fmtMoneyCompact(totalRecorded, currency) }) });
+  }
+  if (hasWidget(caps, WIDGETS.STAT_OUTSTANDING)) {
+    boardRows.push({ id: 'outstanding', icon: 'expenses', tone: overdue.length > 0 ? 'danger' : 'neutral', label: t('dash_stat_outstanding'), value: fmtMoneyCompact(balance, currency), caption: overdue.length > 0 ? tf('dash_hint_overdue', { count: overdue.length }) : t('dash_hint_on_track') });
+  }
+  if (hasWidget(caps, WIDGETS.STAT_MY_UNITS)) {
+    boardRows.push({ id: 'my-units', icon: 'units', tone: 'accent', label: t('dash_stat_my_units'), value: String(myUnitsCount) });
+  }
+  if (hasWidget(caps, WIDGETS.STAT_PAID_YTD)) {
+    boardRows.push({ id: 'paid-ytd', icon: 'payments', tone: 'positive', label: t('dash_stat_paid_ytd'), value: fmtMoneyCompact(paidYTD, currency) });
+  }
+  if (hasWidget(caps, WIDGETS.STAT_OPEN_TICKETS)) {
+    boardRows.push({ id: 'tickets', icon: 'maintenance', tone: openTickets ? 'warning' : 'neutral', label: t('dash_stat_open_tickets'), value: String(openTickets), caption: openTickets ? t('dash_hint_attention') : t('dash_hint_clear') });
+  }
+  if (hasWidget(caps, WIDGETS.STAT_OPEN_POLLS)) {
+    boardRows.push({ id: 'polls', icon: 'polls', tone: 'accent', label: t('dash_stat_open_polls'), value: String(openPolls), caption: t('dash_hint_awaiting_votes') });
+  }
+  const collectionRate = paidTotal + balance > 0 ? paidTotal / (paidTotal + balance) : 0;
+  const boardProgress = hasWidget(caps, WIDGETS.STAT_COLLECTION_RATE)
+    ? { label: t('dash_stat_collection_rate'), value: paidTotal, max: paidTotal + balance, display: `${Math.round(collectionRate * 100)}%` }
+    : undefined;
+  const boardTitle = hasWidget(caps, WIDGETS.STAT_ACTIVE_UNITS) ? t('dash_board_title') : t('dash_board_title_mine');
 
   if (loading && !data) {
     return (
@@ -277,26 +308,12 @@ function ResidentDashboard({ role }: { role: Role }) {
           (admin-only) plans page. */}
       {canToggleAdminView && <SubscriptionBanner building={building} onPress={() => navigation.navigate('Plans')} />}
 
-      {/* Stat strip */}
-      {statCards.length > 0 && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.statsRow}
-        >
-          {statCards.map((c) => c.node)}
-        </ScrollView>
-      )}
+      {/* Headline tiles — two half-width cards, no horizontal scrolling */}
+      {heroTiles.length > 0 && <View style={styles.heroTilesRow}>{heroTiles.slice(0, 2)}</View>}
 
-      {/* Modules grid */}
-      {allowedModules.length > 0 && (
-        <>
-          <SectionHeader title={t('dash_modules')} />
-          <ModulesGrid
-            modules={allowedModules}
-            onPress={(m) => navigation.getParent()?.navigate(m.route as never)}
-          />
-        </>
+      {/* Numbers board */}
+      {(boardRows.length > 0 || boardProgress) && (
+        <StatsBoard title={boardTitle} rows={boardRows} progress={boardProgress} />
       )}
 
       {/* Primary chart per role (one of these capabilities is granted) */}
@@ -334,7 +351,7 @@ function ResidentDashboard({ role }: { role: Role }) {
       )}
 
       {/* Secondary role sections */}
-      {hasWidget(caps, WIDGETS.SECTION_NEEDS_ATTENTION) && <NeedsAttention tickets={tickets} payments={payments} canInvite={hasAction(caps, ACTIONS.USER_INVITE)} currency={currency} />}
+      {hasWidget(caps, WIDGETS.SECTION_NEEDS_ATTENTION) && <NeedsAttention tickets={tickets} payments={payments} currency={currency} />}
       {hasWidget(caps, WIDGETS.SECTION_RECENT_ACTIVITY) && <RecentActivity users={users} />}
       {hasWidget(caps, WIDGETS.SECTION_PAYMENT_SUMMARY) && <PaymentSummary nextDue={nextDue} overdue={overdue.length} outstanding={outstanding.length} balance={balance} currency={currency} />}
       {hasWidget(caps, WIDGETS.SECTION_OPEN_POLLS) && <DependentSection polls={polls} />}
@@ -388,54 +405,6 @@ function SubscriptionBanner({
   );
 }
 
-const GRID_COLS = 3;
-const GRID_GAP = 10;
-
-/** Two-stop gradients that give each module tile's icon chip its energy. */
-const TONE_GRADIENTS: Record<ModuleEntry['tone'], [string, string]> = {
-  accent: ['#818cf8', '#4f46e5'],
-  positive: ['#34d399', '#059669'],
-  warning: ['#fbbf24', '#d97706'],
-  danger: ['#f87171', '#dc2626'],
-  neutral: ['#94a3b8', '#475569'],
-};
-
-/**
- * Fixed 3-column grid with pixel-exact tile widths. Percentage widths plus
- * `gap` overflow the row by a fraction of a point and wrap to 2 ragged
- * columns — computing from the window width keeps every row aligned.
- */
-function ModulesGrid({ modules, onPress }: { modules: ModuleEntry[]; onPress: (m: ModuleEntry) => void }) {
-  const { width } = useWindowDimensions();
-  const tileWidth = Math.floor((width - spacing.lg * 2 - GRID_GAP * (GRID_COLS - 1)) / GRID_COLS);
-  return (
-    <View style={styles.quickGrid}>
-      {modules.map((m) => (
-        <ModuleTile key={m.id} module={m} width={tileWidth} onPress={() => onPress(m)} />
-      ))}
-    </View>
-  );
-}
-
-function ModuleTile({ module, width, onPress }: { module: ModuleEntry; width: number; onPress: () => void }) {
-  const { t } = useI18n();
-  const gradient = TONE_GRADIENTS[module.tone];
-  return (
-    <TouchableOpacity style={[styles.moduleTile, { width }]} activeOpacity={0.8} onPress={onPress}>
-      <LinearGradient
-        colors={gradient}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.moduleIcon}
-      >
-        <Icon name={module.icon} size={24} color="#fff" strokeWidth={2.2} />
-      </LinearGradient>
-      <Text style={styles.moduleLabel} numberOfLines={1}>{t(module.labelKey)}</Text>
-      <View style={[styles.moduleStripe, { backgroundColor: gradient[1] }]} />
-    </TouchableOpacity>
-  );
-}
-
 function CollectionsChart({ trend, currency }: { trend: { label: string; value: number }[]; currency: string }) {
   const { tf } = useI18n();
   const max = Math.max(...trend.map((t) => t.value));
@@ -475,7 +444,7 @@ function PaymentsByCategoryChart({ currency, payments }: { currency: string; pay
   const data = [
     { value: sumByType('monthly_dues'), text: t('dash_legend_dues'), color: palette.warning },
     { value: sumByType('expense_split'), text: t('dash_legend_util'), color: palette.success },
-    { value: sumByType('one_off'), text: t('dash_legend_rent_in'), color: palette.accent },
+    { value: sumByType('one_off'), text: t('dash_legend_special'), color: palette.accent },
   ].filter((d) => d.value > 0);
   const total = data.reduce((s, d) => s + d.value, 0);
   return (
@@ -488,19 +457,12 @@ function PaymentsByCategoryChart({ currency, payments }: { currency: string; pay
         innerCircleColor={palette.surface}
         centerLabelComponent={() => (
           <View style={{ alignItems: 'center' }}>
-            <Text style={type.caption}>YTD</Text>
+            <Text style={type.caption}>{t('dash_ytd')}</Text>
             <Text style={type.title}>{fmtMoneyCompact(total, currency)}</Text>
           </View>
         )}
       />
-      <View style={styles.legendRow}>
-        {data.map((d) => (
-          <View key={d.text} style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: d.color }]} />
-            <Text style={type.small}>{d.text} {fmtMoneyCompact(d.value, currency)}</Text>
-          </View>
-        ))}
-      </View>
+      <Legend items={data.map((d) => ({ color: d.color, label: `${d.text} ${fmtMoneyCompact(d.value, currency)}` }))} />
     </View>
   );
 }
@@ -551,7 +513,7 @@ function PollsChart({ polls }: { polls: Poll[] }) {
   );
 }
 
-function NeedsAttention({ tickets, payments, canInvite, currency }: { tickets: MaintenanceRequest[]; payments: Payment[]; canInvite: boolean; currency: string }) {
+function NeedsAttention({ tickets, payments, currency }: { tickets: MaintenanceRequest[]; payments: Payment[]; currency: string }) {
   const { t, tf } = useI18n();
   const overduePayments = payments.filter((p) => p.status === 'overdue');
   return (
@@ -565,10 +527,14 @@ function NeedsAttention({ tickets, payments, canInvite, currency }: { tickets: M
             overduePayments.length === 1 ? 'dash_needs_overdue_title' : 'dash_needs_overdue_title_plural',
             { count: overduePayments.length }
           )}
-          subtitle={tf('dash_needs_overdue_subtitle', {
-            amount: fmtMoney(overduePayments.reduce((s, p) => s + p.amount, 0), currency),
-            units: String(overduePayments.length) || t('dash_needs_overdue_no_units'),
-          })}
+          subtitle={
+            overduePayments.length > 0
+              ? tf('dash_needs_overdue_subtitle', {
+                  amount: fmtMoney(overduePayments.reduce((s, p) => s + remainingOf(p), 0), currency),
+                  units: String(new Set(overduePayments.map((p) => p.unitId)).size),
+                })
+              : t('dash_needs_overdue_no_units')
+          }
         />
         <Divider />
         <ActivityRow
@@ -577,12 +543,7 @@ function NeedsAttention({ tickets, payments, canInvite, currency }: { tickets: M
           title={tf('dash_needs_new_tickets', { count: tickets.filter((tk) => tk.status === 'open').length })}
           subtitle={tickets[0] ? tickets[0].title : t('dash_needs_no_tickets')}
         />
-        {canInvite && (
-          <>
-            <Divider />
-            <ActivityRow iconName="users" tone="accent" title={t('dash_needs_invite_pending')} subtitle={t('dash_needs_invite_subtitle')} />
-          </>
-        )}
+
       </Card>
     </>
   );
@@ -597,9 +558,7 @@ function RecentActivity({ users }: { users: BuildingUser[] }) {
         {users.slice(0, 3).map((u, i) => (
           <View key={u._id}>
             <View style={styles.activityRow}>
-              <View style={styles.activityAvatar}>
-                <Text style={styles.activityInitial}>{(u.firstName || u.phone || '?')[0]}</Text>
-              </View>
+              <Avatar name={`${u.firstName ?? ''} ${u.lastName ?? ''}`} />
               <View style={{ flex: 1 }}>
                 <Text style={[type.body, { fontWeight: '600' }]}>{u.firstName} {u.lastName}</Text>
                 <Text style={type.small}>
@@ -630,7 +589,7 @@ function PaymentSummary({ nextDue, overdue, outstanding, balance, currency }: { 
             <View style={styles.nextRow}>
               <View>
                 <Text style={type.caption}>{tf('dash_due', { relative: relativeDay(nextDue.dueDate) })}</Text>
-                <Text style={[type.display, { marginTop: 4 }]}>{fmtMoney(nextDue.amount, currency)}</Text>
+                <Text style={[type.display, { marginTop: 4 }]}>{fmtMoney(remainingOf(nextDue), currency)}</Text>
                 <Text style={[type.small, { marginTop: 2 }]}>
                   {t(
                     nextDue.type === 'monthly_dues'
@@ -711,7 +670,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
   centered: { alignItems: 'center', justifyContent: 'center' },
   errorBanner: { color: palette.danger, marginBottom: spacing.md },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   heroWrap: {
     marginBottom: spacing.lg,
     borderRadius: 24,
@@ -797,47 +756,12 @@ const styles = StyleSheet.create({
   trialBannerText: { flex: 1, fontSize: 13, fontWeight: '700', color: palette.accent },
   trialBannerCta: { fontSize: 12.5, fontWeight: '800', color: palette.accent, textDecorationLine: 'underline' },
 
-  statsRow: { paddingEnd: spacing.lg, gap: spacing.md },
-  statCard: { width: 160, marginEnd: spacing.md },
+  heroTilesRow: { flexDirection: 'row', gap: spacing.md, marginBottom: spacing.md },
+  heroTile: { flex: 1 },
 
-  quickGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP },
-  moduleTile: {
-    backgroundColor: palette.surface,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: palette.border,
-    paddingVertical: spacing.lg,
-    paddingHorizontal: 6,
-    alignItems: 'center',
-    overflow: 'hidden',
-    ...shadow,
-  },
-  moduleIcon: {
-    width: 52,
-    height: 52,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  moduleLabel: { fontSize: 12.5, color: palette.text, fontWeight: '700', marginTop: 10, textAlign: 'center' },
-  moduleStripe: {
-    position: 'absolute',
-    bottom: 0,
-    left: 14,
-    right: 14,
-    height: 3,
-    borderTopLeftRadius: 2,
-    borderTopRightRadius: 2,
-    opacity: 0.8,
-  },
 
-  legendRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md, marginTop: spacing.md, justifyContent: 'center' },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  legendDot: { width: 10, height: 10, borderRadius: 5 },
 
   activityRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
-  activityAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: palette.accentSoft, alignItems: 'center', justifyContent: 'center' },
-  activityInitial: { color: palette.accent, fontWeight: '700' },
 
   pollRow: { paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
 

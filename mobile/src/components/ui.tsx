@@ -171,8 +171,90 @@ const statStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  iconText: { fontSize: 14, fontWeight: '800' },
   value: { marginTop: spacing.xs, fontSize: 24, fontWeight: '700' },
+});
+
+/**
+ * Flat "label + big colored number" tile — THE shared stat tile. Every screen
+ * that shows a labelled figure uses this one (the gradient `StatCard` above is
+ * reserved for the dashboard's hero row). Lay tiles out in a wrapping row;
+ * they grow from a 48% basis into a 2-column grid.
+ */
+export function StatTile({
+  label,
+  value,
+  hint,
+  tone = 'neutral',
+  onPress,
+  style,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  tone?: 'neutral' | 'positive' | 'warning' | 'danger' | 'accent';
+  onPress?: () => void;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const fg =
+    tone === 'accent'
+      ? palette.accent
+      : tone === 'positive'
+        ? palette.success
+        : tone === 'warning'
+          ? palette.warning
+          : tone === 'danger'
+            ? palette.danger
+            : palette.text;
+  const body = (
+    <>
+      <Text style={[type.caption, { color: palette.textSubtle }]} numberOfLines={1}>{label}</Text>
+      <Text style={[type.display, statTileStyles.value, { color: fg }]} numberOfLines={1}>{value}</Text>
+      {hint ? <Text style={[type.small, statTileStyles.hint]} numberOfLines={2}>{hint}</Text> : null}
+    </>
+  );
+  if (onPress) {
+    return (
+      <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={[statTileStyles.tile, style]}>
+        {body}
+      </TouchableOpacity>
+    );
+  }
+  return <View style={[statTileStyles.tile, style]}>{body}</View>;
+}
+
+const statTileStyles = StyleSheet.create({
+  tile: {
+    flexBasis: '48%',
+    flexGrow: 1,
+    backgroundColor: palette.surface,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: palette.border,
+    padding: spacing.md,
+    ...shadow,
+  },
+  value: { marginTop: 4, fontSize: 22 },
+  hint: { marginTop: 2 },
+});
+
+/** Chart legend row — one shared look for every chart's key. */
+export function Legend({ items }: { items: { color: string; label: string }[] }) {
+  return (
+    <View style={legendStyles.row}>
+      {items.map((it) => (
+        <View key={it.label} style={legendStyles.item}>
+          <View style={[legendStyles.dot, { backgroundColor: it.color }]} />
+          <Text style={type.small}>{it.label}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const legendStyles = StyleSheet.create({
+  row: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md, marginTop: spacing.md, justifyContent: 'center' },
+  item: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  dot: { width: 10, height: 10, borderRadius: 5 },
 });
 
 export function Pill({
@@ -208,7 +290,7 @@ const pillStyles = StyleSheet.create({
     borderRadius: radii.pill,
     alignSelf: 'flex-start',
   },
-  text: { fontSize: 12, fontWeight: '600', textTransform: 'capitalize' },
+  text: { fontSize: 12, fontWeight: '600' },
 });
 
 /**

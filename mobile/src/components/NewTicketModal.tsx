@@ -88,7 +88,7 @@ export function NewTicketModal({ open, onClose, unit, onCreated }: NewTicketModa
       });
       onCreated(request);
     } catch (e) {
-      setError(apiErrorMessage(e, 'Could not create ticket.'));
+      setError(apiErrorMessage(e, t('ticket_err_create')));
     } finally {
       setSubmitting(false);
     }
@@ -232,7 +232,7 @@ const styles = StyleSheet.create({
     backgroundColor: palette.surfaceMuted,
   },
   chipActive: { backgroundColor: palette.accent, borderColor: palette.accent },
-  chipText: { fontSize: 12, color: palette.textMuted, fontWeight: '600', textTransform: 'capitalize' },
+  chipText: { fontSize: 12, color: palette.textMuted, fontWeight: '600' },
   chipTextActive: { color: '#fff' },
   chipGlyph: { fontSize: 13 },
   error: { ...type.small, color: palette.danger, marginTop: spacing.md },

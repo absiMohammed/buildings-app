@@ -283,7 +283,7 @@ function UnitFormModal({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   row: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.lg, paddingVertical: 12 },
   divider: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.divider },

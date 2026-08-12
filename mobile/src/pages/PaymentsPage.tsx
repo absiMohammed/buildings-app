@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useAuth, useCurrency } from '../auth/AuthContext';
 import { ACTIONS, hasAction } from '../auth/capabilities';
 import { type IconName } from '../components/Icon';
@@ -12,16 +12,18 @@ import {
   Pill,
   Segmented,
 } from '../components/ui';
-import { fmtMoney, fmtMoneyCompact, relativeDay } from '../utils/format';
+import { fmtDate, fmtMoney, fmtMoneyCompact, relativeDay } from '../utils/format';
+import { paymentTypeLabel } from '../utils/labels';
 import {
   createPayment,
+  isPartiallyPaid,
   listPayments,
-  payPayment,
-  updatePayment,
+  recordReceipts,
+  remainingOf,
   type Payment,
 } from '../api/payments';
 import { listUnits, type Unit } from '../api/units';
-import { useApiResource } from '../api/useApiResource';
+import { apiErrorMessage, useApiResource } from '../api/useApiResource';
 import { RecordPaymentModal } from '../components/RecordPaymentModal';
 import { NewChargeModal } from '../components/NewChargeModal';
 import { UnitFilterPicker } from '../components/UnitFilterPicker';
@@ -32,14 +34,6 @@ type FilterValue = 'all' | 'pending' | 'paid' | 'overdue';
 interface PaymentsData {
   payments: Payment[];
   units: Unit[];
-}
-
-// Every payment type has a translated label — never show a raw enum value.
-function paymentTypeLabel(pt: Payment['type'], t: ReturnType<typeof useI18n>['t']): string {
-  if (pt === 'monthly_dues') return t('ptype_building_dues');
-  if (pt === 'expense_split') return t('ptype_utilities');
-  if (pt === 'rent') return t('ptype_rent');
-  return t('ptype_special');
 }
 
 function paymentIcon(pt: Payment['type']): IconName {
@@ -66,6 +60,7 @@ export function PaymentsPage() {
   const [unitFilter, setUnitFilter] = useState<string>('all');
   const [receivingFor, setReceivingFor] = useState<Payment | null>(null);
   const [newChargeOpen, setNewChargeOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   const { t, tf } = useI18n();
 
   const fetcher = useCallback(async (): Promise<PaymentsData> => {
@@ -74,7 +69,7 @@ export function PaymentsPage() {
   }, []);
   const { data, loading, refreshing, error, refresh, reload } = useApiResource(
     fetcher,
-    'Could not load payments.'
+    t('payments_err_load')
   );
 
   // The server returns building-wide payments to a building admin. When
@@ -107,7 +102,7 @@ export function PaymentsPage() {
 
   // Map unit id → number for display and for the unit filter.
   const numberOf = useCallback(
-    (unitId: string) => units.find((u) => u._id === unitId)?.number ?? unitId,
+    (unitId: string) => units.find((u) => u._id === unitId)?.number ?? '—',
     [units]
   );
 
@@ -129,7 +124,10 @@ export function PaymentsPage() {
   const totalsByStatus = useMemo(() => {
     const totals: Record<Payment['status'], number> = { pending: 0, paid: 0, overdue: 0, waived: 0 };
     scoped.forEach((p) => {
-      totals[p.status] += p.amount;
+      // Open buckets count what's still owed; the paid bucket counts what
+      // actually came in (including partial receipts on open charges).
+      totals[p.status] += p.status === 'paid' ? p.amount : remainingOf(p);
+      if (p.status !== 'paid') totals.paid += p.paidAmount ?? 0;
     });
     return totals;
   }, [scoped]);
@@ -138,19 +136,25 @@ export function PaymentsPage() {
     filter === 'all' ? totalsByStatus.pending + totalsByStatus.overdue : totalsByStatus[filter];
   const summaryCount = filtered.length;
 
-  async function markSelectedPaid(ids: string[]) {
-    for (const id of ids) {
-      const p = all.find((x) => x._id === id);
-      // PATCH covers both the admin mark-paid path and the owner rent path;
-      // POST /:id/pay is the (admin-recorded) resident self-record fallback.
-      if (canMarkPaid || (p && canActOn(p))) {
-        await updatePayment(id, { status: 'paid', paymentMethod: 'cash' });
-      } else {
-        await payPayment(id, { paymentMethod: 'cash' });
+  async function submitReceipt(input: { paymentIds: string[]; amount: number; note: string }) {
+    setBusy(true);
+    try {
+      const { surplus } = await recordReceipts({
+        paymentIds: input.paymentIds,
+        amount: input.amount,
+        paymentMethod: 'cash',
+        note: input.note,
+      });
+      setReceivingFor(null);
+      if (surplus) {
+        Alert.alert(tf('unit_credited_to_balance', { amount: fmtMoney(surplus.amount, currency) }));
       }
+      await reload();
+    } catch (e) {
+      Alert.alert(apiErrorMessage(e, t('err_generic')));
+    } finally {
+      setBusy(false);
     }
-    setReceivingFor(null);
-    await reload();
   }
 
   async function createCharges(input: {
@@ -160,18 +164,25 @@ export function PaymentsPage() {
     notes: string;
     dueDate: string;
   }) {
-    for (const unitId of input.unitIds) {
-      await createPayment({
-        unitId,
-        type: input.type,
-        amount: input.amountPerUnit,
-        currency,
-        dueDate: input.dueDate,
-        notes: input.notes,
-      });
+    setBusy(true);
+    try {
+      for (const unitId of input.unitIds) {
+        await createPayment({
+          unitId,
+          type: input.type,
+          amount: input.amountPerUnit,
+          currency,
+          dueDate: input.dueDate,
+          notes: input.notes,
+        });
+      }
+      setNewChargeOpen(false);
+    } catch (e) {
+      Alert.alert(apiErrorMessage(e, t('err_generic')));
+    } finally {
+      setBusy(false);
+      await reload();
     }
-    setNewChargeOpen(false);
-    await reload();
   }
 
   if (loading) {
@@ -189,7 +200,7 @@ export function PaymentsPage() {
           iconName="payments"
           title={t('payments_empty_default')}
           body={error}
-          action={{ label: t('back'), onPress: () => void refresh() }}
+          action={{ label: t('retry'), onPress: () => void refresh() }}
         />
       </View>
     );
@@ -207,10 +218,10 @@ export function PaymentsPage() {
             {filter === 'all'
               ? t('payments_outstanding_caps')
               : filter === 'pending'
-                ? t('payments_filter_pending').toUpperCase()
+                ? t('payments_filter_pending')
                 : filter === 'paid'
-                  ? t('payments_filter_paid').toUpperCase()
-                  : t('payments_filter_overdue').toUpperCase()}
+                  ? t('payments_filter_paid')
+                  : t('payments_filter_overdue')}
           </Text>
           <Text style={type.display}>{fmtMoney(summaryAmount, currency)}</Text>
           <Text style={type.small}>
@@ -302,7 +313,8 @@ export function PaymentsPage() {
               canActOn(p)
           )}
           lockedPaymentIds={[receivingFor._id]}
-          onSubmit={({ selectedIds }) => void markSelectedPaid(selectedIds)}
+          submitting={busy}
+          onSubmit={(input) => void submitReceipt(input)}
         />
       )}
     </ScrollView>
@@ -349,19 +361,38 @@ function PaymentCard({ payment, unitNumber, currency, canAct, canMarkPaid, onAct
           <IconCircle iconName={paymentIcon(payment.type)} tone={tone === 'positive' ? 'positive' : tone === 'danger' ? 'danger' : 'accent'} />
           <View style={{ flex: 1 }}>
             <Text style={[type.body, { fontWeight: '600' }]}>
-              {paymentTypeLabel(payment.type, t)}
+              {paymentTypeLabel(t, payment.type)}
             </Text>
             <Text style={type.small}>
               {tf('maint_place_unit', { n: unitNumber })} · {tf('dash_due', { relative: relativeDay(payment.dueDate) })}
             </Text>
           </View>
         </View>
-        <Pill label={statusLabel} tone={tone} />
+        <View style={{ alignItems: 'flex-end', gap: 4 }}>
+          <Pill label={statusLabel} tone={tone} />
+          {isPartiallyPaid(payment) && (
+            <Pill
+              label={tf('record_payment_paid_inline', { amount: fmtMoney(payment.paidAmount, currency) })}
+              tone="accent"
+            />
+          )}
+        </View>
       </View>
 
       <View style={styles.amountRow}>
-        <Text style={type.title}>{fmtMoney(payment.amount, currency)}</Text>
-        <Text style={type.small}>{new Date(payment.dueDate).toLocaleDateString()}</Text>
+        {/* Open charges show what's still owed; partially covered rows keep
+            the original amount visible alongside. */}
+        <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: spacing.sm }}>
+          <Text style={type.title}>
+            {fmtMoney(payment.status === 'paid' ? payment.amount : remainingOf(payment), currency)}
+          </Text>
+          {isPartiallyPaid(payment) && (
+            <Text style={[type.small, { textDecorationLine: 'line-through' }]}>
+              {fmtMoney(payment.amount, currency)}
+            </Text>
+          )}
+        </View>
+        <Text style={type.small}>{fmtDate(payment.dueDate)}</Text>
       </View>
 
       {canAct && (
@@ -378,7 +409,7 @@ function PaymentCard({ payment, unitNumber, currency, canAct, canMarkPaid, onAct
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg },
   summaryCards: { flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg },

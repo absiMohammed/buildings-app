@@ -6,11 +6,13 @@ import {
   Modal,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   View,
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BlurView } from '@react-native-community/blur';
 import { palette, shadow, spacing } from './theme';
 
@@ -38,6 +40,7 @@ export interface BottomSheetProps {
  * modal slide animation; everything fades + scales in via Animated.
  */
 export function BottomSheet({ open, onClose, onClosed, centered, cardStyle, hideHandle, children }: BottomSheetProps) {
+  const insets = useSafeAreaInsets();
   // We keep the underlying Modal mounted until the close animation finishes.
   const [mounted, setMounted] = useState(open);
   // Latest onClosed, read at animation-end without re-subscribing the effect.
@@ -154,10 +157,24 @@ export function BottomSheet({ open, onClose, onClosed, centered, cardStyle, hide
         pointerEvents="box-none"
       >
         <Animated.View
-          style={[centered ? styles.centered : styles.sheet, cardStyle, sheetTransforms]}
+          style={[
+            centered ? styles.centered : styles.sheet,
+            // Keep buttons above the iPhone home indicator.
+            !centered && { paddingBottom: Math.max(insets.bottom, spacing.md) + spacing.md },
+            cardStyle,
+            sheetTransforms,
+          ]}
         >
           {!hideHandle && !centered ? <View style={styles.handle} /> : null}
-          {children}
+          {centered ? (
+            children
+          ) : (
+            // Long forms scroll instead of clipping at maxHeight; short
+            // content is unaffected. Taps keep working mid-keyboard.
+            <ScrollView bounces={false} keyboardShouldPersistTaps="handled">
+              {children}
+            </ScrollView>
+          )}
         </Animated.View>
       </KeyboardAvoidingView>
     </Modal>

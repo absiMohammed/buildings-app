@@ -21,6 +21,11 @@ export const WIDGETS = {
   STAT_ACTIVE_UNITS: 'dashboard.stat.active_units',
   STAT_OPEN_TICKETS: 'dashboard.stat.open_tickets',
   STAT_YOUR_UNIT: 'dashboard.stat.your_unit',
+  // Stats-board rows (the "بالأرقام" numbers card on the dashboard).
+  STAT_RESIDENTS: 'dashboard.stat.residents',
+  STAT_COLLECTION_RATE: 'dashboard.stat.collection_rate',
+  STAT_PAID_YTD: 'dashboard.stat.paid_ytd',
+  STAT_MY_UNITS: 'dashboard.stat.my_units',
 
   CHART_COLLECTIONS: 'dashboard.chart.collections',
   CHART_PAYMENTS_BY_CATEGORY: 'dashboard.chart.payments_by_category',
@@ -129,6 +134,9 @@ const BUILDING_ADMIN_CAPS: Capabilities = {
     WIDGETS.STAT_OUTSTANDING,
     WIDGETS.STAT_ACTIVE_UNITS,
     WIDGETS.STAT_OPEN_TICKETS,
+    WIDGETS.STAT_OPEN_POLLS,
+    WIDGETS.STAT_RESIDENTS,
+    WIDGETS.STAT_COLLECTION_RATE,
     WIDGETS.CHART_COLLECTIONS,
     WIDGETS.SECTION_NEEDS_ATTENTION,
     WIDGETS.SECTION_RECENT_ACTIVITY,
@@ -163,6 +171,8 @@ const BUILDING_ADMIN_CAPS: Capabilities = {
 const OWNER_CAPS: Capabilities = {
   widgets: [
     ...RESIDENT_WIDGETS,
+    WIDGETS.STAT_MY_UNITS,
+    WIDGETS.STAT_PAID_YTD,
     WIDGETS.CHART_PAYMENTS_BY_CATEGORY,
   ],
   // Owners get the Units + Users surfaces scoped to THEIR OWN units: the
@@ -187,6 +197,7 @@ const OWNER_CAPS: Capabilities = {
 const RENTER_CAPS: Capabilities = {
   widgets: [
     ...RESIDENT_WIDGETS,
+    WIDGETS.STAT_PAID_YTD,
     WIDGETS.CHART_PAYMENT_HISTORY,
   ],
   // Renters get the Household surface so they can manage dependents

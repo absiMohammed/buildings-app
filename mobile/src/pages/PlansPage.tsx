@@ -276,7 +276,7 @@ function FeatureLine({ text, highlight = false }: { text: string; highlight?: bo
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   titleRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: spacing.lg },
   title: { marginBottom: 2 },
   subtitle: {},

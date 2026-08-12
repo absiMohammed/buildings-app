@@ -451,7 +451,7 @@ function BuildingRow({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { alignItems: 'center', justifyContent: 'center' },
   row: {
     flexDirection: 'row',

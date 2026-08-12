@@ -1,3 +1,4 @@
+import { fmtDate, fmtMoney } from '../utils/format';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   RefreshControl,
@@ -8,15 +9,15 @@ import {
   View,
 } from 'react-native';
 import { api } from '../api/client';
-import { Button, Card, EmptyState, Pill, SectionHeader } from '../components/ui';
+import { Button, Card, EmptyState, Pill, SectionHeader, StatTile } from '../components/ui';
 import {
   RecordSubscriptionPaymentModal,
   type BuildingOption,
   type SubscriptionPayment,
 } from '../components/RecordSubscriptionPaymentModal';
 import { SubscriptionReceiptModal } from '../components/SubscriptionReceiptModal';
-import { useConfirm } from '../components/ConfirmProvider';
-import { palette, radii, shadow, spacing, type } from '../components/theme';
+import { palette, radii, spacing, type } from '../components/theme';
+import { ActionSheet } from '../components/ActionSheet';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 
@@ -62,7 +63,6 @@ const STATUS_TONE: Record<SubscriptionPayment['status'], 'positive' | 'accent' |
  */
 export function AdminPaymentsPage() {
   const { t, tf } = useI18n();
-  const { confirm } = useConfirm();
   const [summary, setSummary] = useState<RevenueSummary | null>(null);
   const [payments, setPayments] = useState<SubscriptionPayment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -72,6 +72,7 @@ export function AdminPaymentsPage() {
   const [editingPayment, setEditingPayment] = useState<SubscriptionPayment | null>(null);
   const [defaultBuildingId, setDefaultBuildingId] = useState<string | undefined>(undefined);
   const [receiptPayment, setReceiptPayment] = useState<SubscriptionPayment | null>(null);
+  const [actionPayment, setActionPayment] = useState<SubscriptionPayment | null>(null);
 
   // Filters + cursor pagination state. Changing any filter resets the list
   // and refetches from the head. `nextBefore` is the cursor returned by the
@@ -143,7 +144,7 @@ export function AdminPaymentsPage() {
   }, [summary]);
 
   function fmt(amount: number, currency: string): string {
-    return `${currency} ${amount.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+    return fmtMoney(amount, currency);
   }
 
   if (loading) {
@@ -161,7 +162,7 @@ export function AdminPaymentsPage() {
           iconName="payments"
           title={t('sub_err_load')}
           body={error ?? ''}
-          action={{ label: t('back'), onPress: () => void fetch() }}
+          action={{ label: t('retry'), onPress: () => void fetch() }}
         />
       </View>
     );
@@ -185,7 +186,7 @@ export function AdminPaymentsPage() {
     >
       <View style={styles.headerRow}>
         <View style={{ flex: 1 }}>
-          <Text style={type.caption}>{t('sub_title').toUpperCase()}</Text>
+          <Text style={type.caption}>{t('sub_title')}</Text>
           <Text style={type.display}>{fmt(summary.totals.activeMrr, reportingCurrency)}</Text>
           <Text style={type.small}>{t('sub_subtitle_mrr')}</Text>
         </View>
@@ -258,7 +259,7 @@ export function AdminPaymentsPage() {
             activeOpacity={0.85}
           >
             <Text style={[styles.filterChipText, statusFilter === k && styles.filterChipTextActive]}>
-              {k === 'all' ? t('users_filter_all') : t(`sub_status_${k}` as const)}
+              {k === 'all' ? t('filter_all') : t(`sub_status_${k}` as const)}
             </Text>
           </TouchableOpacity>
         ))}
@@ -275,7 +276,7 @@ export function AdminPaymentsPage() {
             activeOpacity={0.85}
           >
             <Text style={[styles.filterChipText, buildingFilter === 'all' && styles.filterChipTextActive]}>
-              {t('users_filter_all')}
+              {t('filter_all')}
             </Text>
           </TouchableOpacity>
           {summary.buildings.map((b) => (
@@ -300,22 +301,10 @@ export function AdminPaymentsPage() {
         ) : (
           payments.map((p, i) => {
             const isOverdue = p.status === 'pending' && new Date(p.dueDate) < new Date();
-            const openRow = async () => {
+            const openRow = () => {
               if (p.status === 'paid') {
-                if (
-                  await confirm({
-                    title: p.buildingName ?? '—',
-                    message: `${p.periodLabel} · ${fmt(p.amount, p.currency)}`,
-                    confirmLabel: t('receipt_share'),
-                  })
-                ) {
-                  setReceiptPayment(p);
-                  return;
-                }
-                if (await confirm({ title: p.buildingName ?? '—', confirmLabel: t('sub_edit_title') })) {
-                  setEditingPayment(p);
-                  setRecordOpen(true);
-                }
+                // Paid rows offer two actions — one sheet, no confirm chain.
+                setActionPayment(p);
                 return;
               }
               setEditingPayment(p);
@@ -326,14 +315,14 @@ export function AdminPaymentsPage() {
                 key={p._id}
                 style={[styles.row, i < payments.length - 1 && styles.divider]}
                 activeOpacity={0.85}
-                onPress={() => void openRow()}
+                onPress={openRow}
               >
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={[type.body, { fontWeight: '600' }]} numberOfLines={1}>
                     {p.buildingName ?? '—'}
                   </Text>
                   <Text style={type.small} numberOfLines={1}>
-                    {p.periodLabel} · {t(p.periodKind === 'annual' ? 'sub_kind_annual' : 'sub_kind_monthly')} · {p.dueDate.slice(0, 10)}
+                    {p.periodLabel} · {t(p.periodKind === 'annual' ? 'sub_kind_annual' : 'sub_kind_monthly')} · {fmtDate(p.dueDate)}
                   </Text>
                 </View>
                 <View style={{ alignItems: 'flex-start', gap: 4 }}>
@@ -390,38 +379,40 @@ export function AdminPaymentsPage() {
         onClose={() => setReceiptPayment(null)}
         payment={receiptPayment}
       />
-    </ScrollView>
-  );
-}
 
-function StatTile({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: 'accent' | 'positive' | 'warning' | 'neutral';
-}) {
-  const fg =
-    tone === 'accent'
-      ? palette.accent
-      : tone === 'positive'
-        ? palette.success
-        : tone === 'warning'
-          ? palette.warning
-          : palette.text;
-  return (
-    <View style={styles.statTile}>
-      <Text style={[type.caption, { color: palette.textSubtle }]}>{label}</Text>
-      <Text style={[type.display, { color: fg, marginTop: 4, fontSize: 22 }]} numberOfLines={1}>{value}</Text>
-    </View>
+      <ActionSheet
+        open={!!actionPayment}
+        onClose={() => setActionPayment(null)}
+        title={actionPayment?.buildingName ?? ''}
+        subtitle={actionPayment ? `${actionPayment.periodLabel} · ${fmt(actionPayment.amount, actionPayment.currency)}` : undefined}
+        items={[
+          {
+            icon: 'documents' as const,
+            label: t('receipt_share'),
+            onPress: () => {
+              if (actionPayment) setReceiptPayment(actionPayment);
+            },
+          },
+          {
+            icon: 'settings' as const,
+            label: t('sub_edit_title'),
+            onPress: () => {
+              if (actionPayment) {
+                setEditingPayment(actionPayment);
+                setRecordOpen(true);
+              }
+            },
+          },
+        ]}
+      />
+
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg, gap: spacing.md },
   filterRow: { flexDirection: 'row', gap: 8, paddingBottom: spacing.sm },
@@ -437,16 +428,6 @@ const styles = StyleSheet.create({
   filterChipText: { fontSize: 13, color: palette.textMuted, fontWeight: '500' },
   filterChipTextActive: { color: '#fff', fontWeight: '600' },
   statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-  statTile: {
-    flexBasis: '48%',
-    flexGrow: 1,
-    backgroundColor: palette.surface,
-    borderRadius: radii.lg,
-    borderWidth: 1,
-    borderColor: palette.border,
-    padding: spacing.md,
-    ...shadow,
-  },
   row: {
     flexDirection: 'row',
     alignItems: 'center',

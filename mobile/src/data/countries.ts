@@ -8,6 +8,25 @@ export interface Country {
   flag: string;
 }
 
+// Arabic country names come from the platform's CLDR data when available
+// (Intl.DisplayNames is engine-dependent on Hermes) — fall back to the
+// English name rather than showing a raw ISO code.
+let displayNamesAr: { of(code: string): string | undefined } | null = null;
+try {
+  const DN = (Intl as unknown as { DisplayNames?: new (l: string[], o: { type: string }) => { of(c: string): string | undefined } }).DisplayNames;
+  if (DN) displayNamesAr = new DN(['ar'], { type: 'region' });
+} catch {
+  displayNamesAr = null;
+}
+
+export function countryName(c: Country, locale: 'en' | 'ar'): string {
+  if (locale === 'ar' && displayNamesAr) {
+    const n = displayNamesAr.of(c.iso);
+    if (n && n !== c.iso) return n;
+  }
+  return c.name;
+}
+
 function flagOf(iso: string): string {
   const A = 0x1f1e6;
   const base = 'A'.charCodeAt(0);

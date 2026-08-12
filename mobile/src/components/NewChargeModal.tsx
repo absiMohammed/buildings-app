@@ -279,7 +279,6 @@ const styles = StyleSheet.create({
     borderRadius: radii.md,
   },
   summaryRow: { fontSize: 13, color: palette.textMuted, marginTop: 2 },
-  summaryStrong: { color: palette.text, fontWeight: '700' },
 
   actions: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.lg },
 });

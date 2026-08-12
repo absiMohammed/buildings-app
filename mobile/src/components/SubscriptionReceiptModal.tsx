@@ -1,3 +1,4 @@
+import { fmtMoney } from '../utils/format';
 import { Share, StyleSheet, Text, View } from 'react-native';
 import { BottomSheet } from './BottomSheet';
 import { Button } from './ui';
@@ -21,10 +22,7 @@ export function SubscriptionReceiptModal({ open, onClose, payment }: Subscriptio
   const { t, tf } = useI18n();
   if (!payment) return null;
 
-  const amountText = `${payment.currency} ${payment.amount.toLocaleString(undefined, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  })}`;
+  const amountText = fmtMoney(payment.amount, payment.currency);
 
   async function share() {
     if (!payment) return;

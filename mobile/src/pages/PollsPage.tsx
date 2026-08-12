@@ -35,7 +35,7 @@ export function PollsPage() {
   const { confirm } = useConfirm();
   const [createOpen, setCreateOpen] = useState(false);
 
-  const polls = useApiResource(listPolls, '');
+  const polls = useApiResource(listPolls, t('polls_err_load'));
 
   if (polls.loading) {
     return (
@@ -52,7 +52,7 @@ export function PollsPage() {
           iconName="polls"
           title={t('nav_polls')}
           body={polls.error ?? undefined}
-          action={{ label: t('back'), onPress: () => void polls.refresh() }}
+          action={{ label: t('retry'), onPress: () => void polls.refresh() }}
         />
       </View>
     );
@@ -302,7 +302,7 @@ function PollCard({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.md },
   pollHeader: { flexDirection: 'row', alignItems: 'flex-start' },

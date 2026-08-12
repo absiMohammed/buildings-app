@@ -280,9 +280,11 @@ export function LoginPage() {
                   const cred = creds[acc.phone];
                   const hasName = !!acc.name?.trim();
                   const display = hasName ? acc.name!.trim() : ltrPhone(acc.phone);
+                  // Leading LETTERS only — a phone-like name must not yield "+9".
                   const initials = (acc.name?.trim() || '')
                     .split(/\s+/)
                     .map((w) => w[0])
+                    .filter((ch) => !!ch && /\p{L}/u.test(ch))
                     .join('')
                     .slice(0, 2)
                     .toUpperCase();
@@ -508,7 +510,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: spacing.sm,
   },
-  biometricGlyph: { fontSize: 18, color: palette.accent },
   biometricLabel: { fontSize: 14, fontWeight: '600', color: palette.accent },
   recentList: { marginTop: spacing.md, gap: spacing.sm },
   recentRow: {

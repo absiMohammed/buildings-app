@@ -13,9 +13,10 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import LinearGradient from 'react-native-linear-gradient';
 import { BarChart, PieChart } from 'react-native-gifted-charts';
 import { api } from '../api/client';
+import { fmtMoney } from '../utils/format';
 import { useAuth } from '../auth/AuthContext';
-import { Card, EmptyState, Notice, SectionHeader } from '../components/ui';
-import { palette, radii, shadow, spacing, type } from '../components/theme';
+import { Card, EmptyState, Notice, SectionHeader, StatTile, Legend } from '../components/ui';
+import { palette, shadow, spacing, type } from '../components/theme';
 import { TAB_BAR_HEIGHT } from '../components/BottomTabBar';
 import { useI18n } from '../i18n';
 import type { Role } from '../auth/AuthContext';
@@ -33,10 +34,6 @@ interface RevenueSummary {
   };
   topByArr: Array<{ _id: string; name: string; annual: number }>;
   buildings: Array<{ _id: string; name: string; currency: string }>;
-}
-
-function fmtMoney(amount: number, currency: string): string {
-  return `${currency} ${amount.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 interface AdminStats {
@@ -149,7 +146,7 @@ export function AdminDashboardPage() {
           iconName="buildings"
           title={t('admin_dash_err_load')}
           body={error ?? ''}
-          action={{ label: t('back'), onPress: () => void fetch() }}
+          action={{ label: t('retry'), onPress: () => void fetch() }}
         />
       </SafeAreaView>
     );
@@ -198,7 +195,7 @@ export function AdminDashboardPage() {
         </View>
 
         <View style={styles.statsGrid}>
-          <StatCard
+          <StatTile
             label={t('admin_dash_stat_buildings')}
             value={String(stats.buildings.total)}
             hint={tf('admin_dash_stat_buildings_hint', {
@@ -208,20 +205,20 @@ export function AdminDashboardPage() {
             tone="accent"
             onPress={() => navigation.getParent()?.navigate('BuildingsTab' as never)}
           />
-          <StatCard
+          <StatTile
             label={t('admin_dash_stat_users')}
             value={String(stats.users.total)}
             hint={tf('admin_dash_stat_users_hint', { admins: stats.users.buildingAdmins })}
             tone="positive"
             onPress={() => navigation.getParent()?.navigate('AllUsersTab' as never)}
           />
-          <StatCard
+          <StatTile
             label={t('admin_dash_stat_units')}
             value={String(stats.units.total)}
             hint={t('admin_dash_stat_units_hint')}
             tone="neutral"
           />
-          <StatCard
+          <StatTile
             label={t('admin_dash_stat_pending_invites')}
             value={String(stats.invites.pending)}
             hint={t('admin_dash_stat_pending_invites_hint')}
@@ -265,22 +262,22 @@ export function AdminDashboardPage() {
                 {t('admin_dash_revenue_hint')}
               </Text>
               <View style={styles.revenueGrid}>
-                <RevenueTile
+                <StatTile
                   label={t('admin_dash_revenue_arr')}
                   value={fmtMoney(revenue.totals.activeArr, revenue.buildings[0]?.currency ?? 'USD')}
                   tone="accent"
                 />
-                <RevenueTile
+                <StatTile
                   label={t('admin_dash_revenue_mrr')}
                   value={fmtMoney(revenue.totals.activeMrr, revenue.buildings[0]?.currency ?? 'USD')}
                   tone="positive"
                 />
-                <RevenueTile
+                <StatTile
                   label={t('admin_dash_revenue_paid_mtd')}
                   value={fmtMoney(revenue.totals.paidMtd, revenue.buildings[0]?.currency ?? 'USD')}
                   tone="positive"
                 />
-                <RevenueTile
+                <StatTile
                   label={t('admin_dash_revenue_outstanding')}
                   value={fmtMoney(revenue.totals.outstanding, revenue.buildings[0]?.currency ?? 'USD')}
                   tone={revenue.totals.outstanding > 0 ? 'warning' : 'neutral'}
@@ -326,16 +323,7 @@ export function AdminDashboardPage() {
                   )}
                 />
               </View>
-              <View style={styles.legendRow}>
-                {pieData.map((s) => (
-                  <View key={s.role} style={styles.legendItem}>
-                    <View style={[styles.legendDot, { backgroundColor: s.color }]} />
-                    <Text style={type.small}>
-                      {t(s.labelKey)} · {s.value}
-                    </Text>
-                  </View>
-                ))}
-              </View>
+              <Legend items={pieData.map((d) => ({ color: d.color, label: `${t(d.labelKey)} · ${d.value}` }))} />
             </Card>
           </>
         )}
@@ -368,70 +356,6 @@ export function AdminDashboardPage() {
         <View style={{ height: TAB_BAR_HEIGHT + spacing.xl }} />
       </ScrollView>
     </SafeAreaView>
-  );
-}
-
-function StatCard({
-  label,
-  value,
-  hint,
-  tone,
-  onPress,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  tone: 'accent' | 'positive' | 'warning' | 'neutral';
-  onPress?: () => void;
-}) {
-  const fg =
-    tone === 'accent'
-      ? palette.accent
-      : tone === 'positive'
-        ? palette.success
-        : tone === 'warning'
-          ? palette.warning
-          : palette.text;
-  const Wrapper: React.ComponentType<{ children: React.ReactNode }> = onPress
-    ? ({ children }) => (
-        <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={styles.statTile}>
-          {children}
-        </TouchableOpacity>
-      )
-    : ({ children }) => <View style={styles.statTile}>{children}</View>;
-  return (
-    <Wrapper>
-      <Text style={[type.caption, { color: palette.textSubtle }]}>{label}</Text>
-      <Text style={[type.display, { color: fg, marginTop: 4 }]}>{value}</Text>
-      {hint ? <Text style={[type.small, { marginTop: 2 }]} numberOfLines={2}>{hint}</Text> : null}
-    </Wrapper>
-  );
-}
-
-function RevenueTile({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: 'accent' | 'positive' | 'warning' | 'neutral';
-}) {
-  const fg =
-    tone === 'accent'
-      ? palette.accent
-      : tone === 'positive'
-        ? palette.success
-        : tone === 'warning'
-          ? palette.warning
-          : palette.text;
-  return (
-    <View style={styles.revenueTile}>
-      <Text style={[type.caption, { color: palette.textSubtle }]}>{label}</Text>
-      <Text style={[type.display, { color: fg, marginTop: 4, fontSize: 20 }]} numberOfLines={1}>
-        {value}
-      </Text>
-    </View>
   );
 }
 
@@ -486,21 +410,8 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: spacing.sm,
   },
-  statTile: {
-    flexBasis: '48%',
-    flexGrow: 1,
-    backgroundColor: palette.surface,
-    borderRadius: radii.lg,
-    borderWidth: 1,
-    borderColor: palette.border,
-    padding: spacing.md,
-    ...shadow,
-  },
 
   pieWrap: { alignItems: 'center', paddingVertical: spacing.sm },
-  legendRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md, marginTop: spacing.md, justifyContent: 'center' },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  legendDot: { width: 10, height: 10, borderRadius: 5 },
 
   attentionList: { gap: spacing.sm, marginBottom: spacing.lg },
   revenueGrid: {
@@ -508,15 +419,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: spacing.sm,
     padding: spacing.md,
-  },
-  revenueTile: {
-    flexBasis: '48%',
-    flexGrow: 1,
-    padding: spacing.md,
-    borderWidth: 1,
-    borderColor: palette.border,
-    borderRadius: radii.lg,
-    backgroundColor: palette.bg,
   },
   topRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm },
   topRowDivider: { borderBottomWidth: 1, borderBottomColor: palette.divider },

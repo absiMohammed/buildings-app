@@ -32,7 +32,7 @@ import { UsersPage } from '../pages/UsersPage';
 import { SettingsPage } from '../pages/SettingsPage';
 import type { AppStackParamList, AuthStackParamList, MainTabParamList } from './types';
 import { BottomTabBar } from '../components/BottomTabBar';
-import { useT } from '../i18n';
+import { useI18n, useT } from '../i18n';
 
 /**
  * Navigation tree (post-refactor):
@@ -167,7 +167,7 @@ function DocumentsStackScreen() {
 }
 
 function UnitsStackScreen() {
-  const t = useT();
+  const { t, tf } = useI18n();
   return (
     <UnitsStack.Navigator screenOptions={commonStackOptions}>
       {/* Module-gated (not admin-gated): plain owners also get the Units
@@ -182,7 +182,7 @@ function UnitsStackScreen() {
       <UnitsStack.Screen
         name="UnitDetail"
         options={({ route }) => ({
-          title: `Unit ${(route.params as { unitNumber?: string }).unitNumber ?? ''}`,
+          title: tf('unit_header', { n: (route.params as { unitNumber?: string }).unitNumber ?? '' }),
         })}
       >
         {() => (

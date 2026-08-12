@@ -9,11 +9,13 @@ import LinearGradient from 'react-native-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { useAuth } from '../auth/AuthContext';
-import { hasModule, MODULES } from '../auth/capabilities';
-import { palette, radii, shadow, spacing, type } from './theme';
+import { hasModule } from '../auth/capabilities';
+import { palette, shadow, spacing, type } from './theme';
 import { QuickActionsModal } from './QuickActionsModal';
 import { BottomSheet } from './BottomSheet';
 import { Icon, type IconName } from './Icon';
+import { ModulesGrid } from './ModuleTiles';
+import { MODULE_REGISTRY, type ModuleEntry } from '../navigation/moduleRegistry';
 import { useT } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 import type { MainTabParamList } from '../navigation/types';
@@ -44,21 +46,15 @@ interface TabDef {
   capability?: string;
 }
 
-const ALL_TABS: TabDef[] = [
-  { route: 'HomeTab', labelKey: 'nav_home', icon: 'home' },
-  { route: 'PaymentsTab', labelKey: 'nav_payments', icon: 'payments', capability: MODULES.PAYMENTS },
-  { route: 'PollsTab', labelKey: 'nav_polls', icon: 'polls', capability: MODULES.POLLS },
-  { route: 'DocumentsTab', labelKey: 'nav_docs', icon: 'documents', capability: MODULES.DOCUMENTS },
-  { route: 'MaintenanceTab', labelKey: 'nav_maintenance', icon: 'maintenance', capability: MODULES.MAINTENANCE },
-  { route: 'ExpensesTab', labelKey: 'nav_expenses', icon: 'expenses', capability: MODULES.EXPENSES },
-  { route: 'UnitsTab', labelKey: 'nav_units', icon: 'units', capability: MODULES.UNITS },
-  { route: 'UsersTab', labelKey: 'nav_users', icon: 'users', capability: MODULES.USERS },
-  { route: 'HouseholdTab', labelKey: 'nav_household', icon: 'household', capability: MODULES.HOUSEHOLD },
-  { route: 'BuildingsTab', labelKey: 'nav_buildings', icon: 'buildings', capability: MODULES.SYSTEM_BUILDINGS },
-  { route: 'AllUsersTab', labelKey: 'nav_users', icon: 'users', capability: MODULES.SYSTEM_USERS },
-  { route: 'PricingTab', labelKey: 'nav_pricing', icon: 'pricing', capability: MODULES.SYSTEM_PRICING },
-  { route: 'AdminPaymentsTab', labelKey: 'nav_admin_payments', icon: 'payments', capability: MODULES.SYSTEM_PAYMENTS },
-];
+// Home is pinned; every other slot comes from the shared module registry
+// (which also feeds the "More" sheet tiles).
+const HOME_TAB: TabDef = { route: 'HomeTab', labelKey: 'nav_home', icon: 'home' };
+const MODULE_TABS: TabDef[] = MODULE_REGISTRY.map((m) => ({
+  route: m.route,
+  labelKey: m.tabLabelKey ?? m.labelKey,
+  icon: m.icon,
+  capability: m.capability,
+}));
 
 export function BottomTabBar({ state, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
@@ -70,19 +66,20 @@ export function BottomTabBar({ state, navigation }: BottomTabBarProps) {
 
   // Exactly four visible slots (2 left + 2 right of the center FAB).
   // Home is always slot 0. The remaining accessible modules fill slots 1–3;
-  // if there are extras, slot 3 becomes "More" and the rest go into the sheet.
-  const { leftTwo, rightTwo, moreTabs } = useMemo(() => {
-    const home = ALL_TABS[0];
-    const accessible = ALL_TABS.slice(1).filter((t) => !t.capability || hasModule(caps, t.capability));
+  // if there are extras, slot 3 becomes "More". The sheet behind "More"
+  // shows ALL accessible modules (not just the overflow) — it took over the
+  // home screen's sections grid as the app's section launcher.
+  const { leftTwo, rightTwo, moreModules } = useMemo(() => {
+    const accessible = MODULE_TABS.filter((t) => !t.capability || hasModule(caps, t.capability));
     const hasOverflow = accessible.length > 2;
     const visible: TabDef[] = hasOverflow
-      ? [home, ...accessible.slice(0, 2), { route: 'HomeTab', labelKey: 'nav_more' as StringKey, icon: 'more' }]
-      : [home, ...accessible];
+      ? [HOME_TAB, ...accessible.slice(0, 2), { route: 'HomeTab', labelKey: 'nav_more' as StringKey, icon: 'more' }]
+      : [HOME_TAB, ...accessible];
     while (visible.length < 4) {
       visible.push({ route: 'HomeTab', labelKey: '_empty' as unknown as StringKey, icon: null });
     }
-    const overflow = hasOverflow ? accessible.slice(2) : [];
-    return { leftTwo: visible.slice(0, 2), rightTwo: visible.slice(2, 4), moreTabs: overflow };
+    const modules = MODULE_REGISTRY.filter((m) => hasModule(caps, m.capability));
+    return { leftTwo: visible.slice(0, 2), rightTwo: visible.slice(2, 4), moreModules: modules };
   }, [caps]);
 
   function go(route: TabRoute) {
@@ -162,7 +159,7 @@ export function BottomTabBar({ state, navigation }: BottomTabBarProps) {
       <MoreSheet
         open={moreOpen}
         onClose={() => setMoreOpen(false)}
-        tabs={moreTabs}
+        modules={moreModules}
         currentRoute={currentRoute}
         onPick={(route) => {
           setMoreOpen(false);
@@ -190,13 +187,13 @@ function TabButton({ tab, active, onPress }: { tab: TabDef; active: boolean; onP
 function MoreSheet({
   open,
   onClose,
-  tabs,
+  modules,
   currentRoute,
   onPick,
 }: {
   open: boolean;
   onClose: () => void;
-  tabs: TabDef[];
+  modules: ModuleEntry[];
   currentRoute?: TabRoute;
   onPick: (route: TabRoute) => void;
 }) {
@@ -204,22 +201,15 @@ function MoreSheet({
   return (
     <BottomSheet open={open} onClose={onClose}>
       <Text style={[type.title, { marginBottom: spacing.md }]}>{t('nav_more')}</Text>
-      <View style={styles.moreGrid}>
-        {tabs.map((tab) => (
-          <TouchableOpacity
-            key={tab.route}
-            style={[styles.moreItem, currentRoute === tab.route && styles.moreItemActive]}
-            activeOpacity={0.85}
-            onPress={() => onPick(tab.route)}
-          >
-            {tab.icon ? <Icon name={tab.icon} size={24} color={palette.text} /> : null}
-            <Text style={styles.moreLabel}>{t(tab.labelKey)}</Text>
-          </TouchableOpacity>
-        ))}
-        {tabs.length === 0 && (
-          <Text style={type.small}>{t('empty_tabs_overflow')}</Text>
-        )}
-      </View>
+      {modules.length === 0 ? (
+        <Text style={type.small}>{t('empty_tabs_overflow')}</Text>
+      ) : (
+        <ModulesGrid
+          modules={modules}
+          activeRoute={currentRoute}
+          onPress={(m) => onPick(m.route)}
+        />
+      )}
     </BottomSheet>
   );
 }
@@ -242,8 +232,6 @@ const styles = StyleSheet.create({
   side: { flex: 1, flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center' },
   centerSpacer: { width: 72 },
   tab: { alignItems: 'center', justifyContent: 'center', minWidth: 56, gap: 2, paddingVertical: 6 },
-  tabGlyph: { fontSize: 20, color: palette.textSubtle, opacity: 0.55 },
-  tabGlyphActive: { color: palette.accent, opacity: 1 },
   tabLabel: { fontSize: 10, color: palette.textSubtle, fontWeight: '500' },
   tabLabelActive: { color: palette.accent, fontWeight: '700' },
 
@@ -260,18 +248,5 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
     elevation: 8,
   },
-  fabGlyph: { fontSize: 26 },
 
-  moreGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md },
-  moreItem: {
-    width: '30%',
-    backgroundColor: palette.surfaceMuted,
-    borderRadius: radii.lg,
-    padding: spacing.md,
-    alignItems: 'center',
-    gap: 4,
-  },
-  moreItemActive: { backgroundColor: palette.accentSoft },
-  moreGlyph: { fontSize: 26 },
-  moreLabel: { fontSize: 12, color: palette.text, fontWeight: '600' },
 });

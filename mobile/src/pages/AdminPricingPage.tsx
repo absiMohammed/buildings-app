@@ -147,7 +147,7 @@ export function AdminPricingPage() {
   if (error && Object.keys(originalPrices).length === 0) {
     return (
       <View style={styles.center}>
-        <EmptyState icon="💸" title={t('pricing_err_load')} body={error} action={{ label: t('back'), onPress: () => void fetch() }} />
+        <EmptyState icon="💸" title={t('pricing_err_load')} body={error} action={{ label: t('retry'), onPress: () => void fetch() }} />
       </View>
     );
   }
@@ -156,7 +156,7 @@ export function AdminPricingPage() {
     <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
       <View style={styles.headerRow}>
         <View style={{ flex: 1 }}>
-          <Text style={type.caption}>{t('pricing_title').toUpperCase()}</Text>
+          <Text style={type.caption}>{t('pricing_title')}</Text>
           <Text style={type.display}>{currency}</Text>
           <Text style={type.small}>{t('pricing_subtitle')}</Text>
         </View>
@@ -215,7 +215,7 @@ export function AdminPricingPage() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   headerRow: { marginBottom: spacing.lg },
   row: {
@@ -238,7 +238,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: palette.text,
     backgroundColor: palette.inputBg,
-    textAlign: 'right',
+    
     ...textStart,
   },
   errorBox: {

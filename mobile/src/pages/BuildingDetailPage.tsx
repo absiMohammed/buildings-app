@@ -525,7 +525,7 @@ function IconAction({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   header: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.md },
   actionBar: {

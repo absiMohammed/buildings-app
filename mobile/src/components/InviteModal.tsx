@@ -371,7 +371,7 @@ const styles = StyleSheet.create({
   },
   chipActive: { backgroundColor: palette.accent, borderColor: palette.accent },
   chipDisabled: { opacity: 0.45 },
-  chipText: { fontSize: 13, color: palette.textMuted, textTransform: 'capitalize', fontWeight: '500' },
+  chipText: { fontSize: 13, color: palette.textMuted, fontWeight: '500' },
   chipTextActive: { color: '#fff', fontWeight: '600' },
   chipTextDisabled: { textDecorationLine: 'line-through' },
   lockedUnitPill: {

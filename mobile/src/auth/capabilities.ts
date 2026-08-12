@@ -10,6 +10,11 @@ export const WIDGETS = {
   STAT_ACTIVE_UNITS: 'dashboard.stat.active_units',
   STAT_OPEN_TICKETS: 'dashboard.stat.open_tickets',
   STAT_YOUR_UNIT: 'dashboard.stat.your_unit',
+  // Stats-board rows (the "بالأرقام" numbers card on the dashboard).
+  STAT_RESIDENTS: 'dashboard.stat.residents',
+  STAT_COLLECTION_RATE: 'dashboard.stat.collection_rate',
+  STAT_PAID_YTD: 'dashboard.stat.paid_ytd',
+  STAT_MY_UNITS: 'dashboard.stat.my_units',
 
   CHART_COLLECTIONS: 'dashboard.chart.collections',
   CHART_PAYMENTS_BY_CATEGORY: 'dashboard.chart.payments_by_category',

@@ -34,9 +34,26 @@ export type ExpenseCategory =
 
 export type SplitMode = 'equal' | 'by_sqft' | 'none';
 
-export type PaymentType = 'monthly_dues' | 'expense_split' | 'one_off';
+export type PaymentType = 'monthly_dues' | 'expense_split' | 'one_off' | 'rent';
 export type PaymentStatus = 'pending' | 'paid' | 'overdue' | 'waived';
-export type PaymentMethod = 'cash' | 'transfer' | 'stripe' | 'other';
+// 'credit' receipts are system-generated when a user's credit balance is
+// auto-applied to a new charge — never accepted from API input.
+export type PaymentMethod = 'cash' | 'transfer' | 'stripe' | 'other' | 'credit';
+
+// One installment received against a charge. A charge is fully paid when its
+// receipts sum to `amount`; anything less leaves it partially covered (the
+// charge keeps its pending/overdue status — "partial" is derived, not stored).
+export interface PaymentReceipt {
+  amount: number;
+  at: string;
+  method: PaymentMethod;
+  externalRef?: string;
+  note?: string;
+  // null = recorded by the system (credit auto-apply).
+  recordedBy?: string | null;
+  // The person the money came from; surplus credits this user's balance.
+  payerId?: string | null;
+}
 
 export type PollStatus = 'draft' | 'open' | 'closed';
 

@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import {
+  Alert,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -14,11 +15,11 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useAuth, useCurrency } from '../auth/AuthContext';
 import { ACTIONS, hasAction } from '../auth/capabilities';
 import { palette, radii, shadow, spacing, type, textStart } from '../components/theme';
-import { Button, Card, EmptyState, Pill, SectionHeader } from '../components/ui';
+import { Button, Card, EmptyState, Pill, SectionHeader, Legend } from '../components/ui';
 import { BottomSheet } from '../components/BottomSheet';
 import { fmtMoney } from '../utils/format';
 import { createUnit, listUnits, type Unit } from '../api/units';
-import { useApiResource } from '../api/useApiResource';
+import { apiErrorMessage, useApiResource } from '../api/useApiResource';
 import type { AppStackParamList } from '../navigation/types';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
@@ -42,6 +43,7 @@ function effectiveDue(u: Unit, buildingDefault: number): number {
 export function UnitsPage() {
   const [filter, setFilter] = useState<Filter>('all');
   const [modalOpen, setModalOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   const currency = useCurrency();
   const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
   const { building, capabilities: caps } = useAuth();
@@ -52,7 +54,7 @@ export function UnitsPage() {
   const fetcher = useCallback(() => listUnits(), []);
   const { data, loading, refreshing, error, refresh, reload } = useApiResource(
     fetcher,
-    'Could not load units.'
+    t('units_err_load')
   );
   const units = useMemo(() => data ?? [], [data]);
 
@@ -84,9 +86,16 @@ export function UnitsPage() {
     bedrooms?: number;
     monthlyDuesAmount?: number;
   }) {
-    await createUnit(input);
-    setModalOpen(false);
-    await reload();
+    setBusy(true);
+    try {
+      await createUnit(input);
+      setModalOpen(false);
+      await reload();
+    } catch (e) {
+      Alert.alert(apiErrorMessage(e, t('err_generic')));
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (loading) {
@@ -102,9 +111,9 @@ export function UnitsPage() {
       <View style={styles.center}>
         <EmptyState
           iconName="units"
-          title={t('unit_not_found_title')}
+          title={t('units_err_load')}
           body={error}
-          action={{ label: t('back'), onPress: () => void refresh() }}
+          action={{ label: t('retry'), onPress: () => void refresh() }}
         />
       </View>
     );
@@ -124,7 +133,6 @@ export function UnitsPage() {
             {tf('units_occupancy_summary', {
               occupied: counts.occupied,
               habitable: units.length,
-              construction: 0,
             })}
           </Text>
         </View>
@@ -138,14 +146,7 @@ export function UnitsPage() {
           <View style={{ flex: 1 }}>
             <Text style={type.caption}>{t('units_potential_mrr')}</Text>
             <Text style={type.title}>{fmtMoney(totalDue, currency)}</Text>
-            <View style={styles.legend}>
-              {pie.map((d) => (
-                <View key={d.text} style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: d.color }]} />
-                  <Text style={type.small}>{d.text} ({d.value})</Text>
-                </View>
-              ))}
-            </View>
+            <Legend items={pie.map((d) => ({ color: d.color, label: `${d.text} (${d.value})` }))} />
           </View>
           {pie.length > 0 && (
             <PieChart
@@ -176,7 +177,7 @@ export function UnitsPage() {
       </View>
 
       {filtered.length === 0 ? (
-        <EmptyState iconName="units" title={t('payments_empty_default')} body={t('payments_empty_default_body')} />
+        <EmptyState iconName="units" title={t('units_empty')} body={t('payments_empty_default_body')} />
       ) : (
         <View style={styles.grid}>
           {filtered.map((u) => (
@@ -214,17 +215,19 @@ export function UnitsPage() {
 
       <View style={{ height: spacing.xl }} />
 
-      <NewUnitModal open={modalOpen} onClose={() => setModalOpen(false)} onSubmit={(input) => void addUnit(input)} />
+      <NewUnitModal open={modalOpen} busy={busy} onClose={() => setModalOpen(false)} onSubmit={(input) => void addUnit(input)} />
     </ScrollView>
   );
 }
 
 function NewUnitModal({
   open,
+  busy,
   onClose,
   onSubmit,
 }: {
   open: boolean;
+  busy?: boolean;
   onClose: () => void;
   onSubmit: (input: { number: string; floor?: number; bedrooms?: number; monthlyDuesAmount?: number }) => void;
 }) {
@@ -290,7 +293,7 @@ function NewUnitModal({
 
         <View style={modalStyles.actions}>
           <Button label={t('cancel')} variant="secondary" onPress={() => { reset(); onClose(); }} style={{ flex: 1 }} />
-          <Button label={t('new_unit_add')} onPress={submit} disabled={!valid} style={{ flex: 1 }} />
+          <Button label={t('new_unit_add')} onPress={submit} disabled={!valid} loading={busy} style={{ flex: 1 }} />
         </View>
       </View>
     </BottomSheet>
@@ -299,18 +302,16 @@ function NewUnitModal({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.md },
   statsCardRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   legend: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.sm, flexWrap: 'wrap' },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  legendDot: { width: 10, height: 10, borderRadius: 5 },
 
   filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: spacing.md },
   filterBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: radii.pill, backgroundColor: palette.surfaceMuted, borderWidth: 1, borderColor: palette.border },
   filterBtnActive: { backgroundColor: palette.accent, borderColor: palette.accent },
-  filterText: { fontSize: 12, color: palette.textMuted, textTransform: 'capitalize', fontWeight: '500' },
+  filterText: { fontSize: 12, color: palette.textMuted, fontWeight: '500' },
   filterTextActive: { color: '#fff', fontWeight: '600' },
 
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md },

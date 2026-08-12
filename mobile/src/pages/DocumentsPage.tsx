@@ -20,9 +20,10 @@ import {
   type BuildingDocument,
   type DocumentCategory,
 } from '../api/documents';
-import { useApiResource } from '../api/useApiResource';
+import { apiErrorMessage, useApiResource } from '../api/useApiResource';
 import { useConfirm } from '../components/ConfirmProvider';
 import { relativeDay } from '../utils/format';
+import { ActionSheet } from '../components/ActionSheet';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 
@@ -59,6 +60,7 @@ export function DocumentsPage() {
   const { t, tf } = useI18n();
   const { confirm } = useConfirm();
   const [query, setQuery] = useState('');
+  const [actionTarget, setActionTarget] = useState<BuildingDocument | null>(null);
 
   // Delete is admin-only server-side; only surface it to the building/system
   // admin. There is no discrete document-delete capability action.
@@ -67,7 +69,7 @@ export function DocumentsPage() {
   const fetcher = useCallback(() => listDocuments(), []);
   const { data, loading, refreshing, error, refresh, reload } = useApiResource(
     fetcher,
-    t('docs_none_match'),
+    t('docs_err_load'),
   );
   const all = useMemo(() => data ?? [], [data]);
 
@@ -91,26 +93,13 @@ export function DocumentsPage() {
     return Object.entries(map) as [DocumentCategory, BuildingDocument[]][];
   }, [filtered]);
 
-  async function open(d: BuildingDocument) {
-    if (
-      await confirm({
-        title: d.title,
-        message: d.description || undefined,
-        confirmLabel: t('buildings_action_open'),
-      })
-    ) {
-      void Linking.openURL(documentDownloadUrl(d._id));
-      return;
-    }
-    if (!canDelete) return;
+  async function removeDocument(d: BuildingDocument) {
     if (!(await confirm({ title: d.title, confirmLabel: t('remove'), destructive: true }))) return;
     try {
       await deleteDocument(d._id);
       await reload();
     } catch (e) {
-      const msg = (e as { response?: { data?: { error?: { message?: string } } } })
-        ?.response?.data?.error?.message;
-      await confirm({ title: t('remove'), message: msg ?? '' });
+      await confirm({ title: t('remove'), message: apiErrorMessage(e, t('err_generic')) });
     }
   }
 
@@ -127,9 +116,9 @@ export function DocumentsPage() {
       <View style={styles.center}>
         <EmptyState
           iconName="documents"
-          title={t('docs_none_match')}
+          title={t('docs_err_load')}
           body={error}
-          action={{ label: t('back'), onPress: () => void refresh() }}
+          action={{ label: t('retry'), onPress: () => void refresh() }}
         />
       </View>
     );
@@ -168,7 +157,7 @@ export function DocumentsPage() {
               const meta = glyphFor(d.mimeType);
               return (
                 <View key={d._id}>
-                  <TouchableOpacity style={styles.row} activeOpacity={0.85} onPress={() => void open(d)}>
+                  <TouchableOpacity style={styles.row} activeOpacity={0.85} onPress={() => setActionTarget(d)}>
                     <IconCircle iconName={meta.iconName} tone={meta.tone} />
                     <View style={{ flex: 1 }}>
                       <Text style={[type.body, { fontWeight: '600' }]} numberOfLines={1}>{d.title}</Text>
@@ -194,13 +183,40 @@ export function DocumentsPage() {
       )}
 
       <View style={{ height: spacing.xl }} />
+
+      <ActionSheet
+        open={!!actionTarget}
+        onClose={() => setActionTarget(null)}
+        title={actionTarget?.title ?? ''}
+        subtitle={actionTarget?.description || undefined}
+        items={[
+          {
+            icon: 'documents' as const,
+            label: t('buildings_action_open'),
+            onPress: () => {
+              if (actionTarget) void Linking.openURL(documentDownloadUrl(actionTarget._id));
+            },
+          },
+          ...(canDelete
+            ? [{
+                icon: 'trash' as const,
+                label: t('remove'),
+                tone: 'danger' as const,
+                onPress: () => {
+                  if (actionTarget) void removeDocument(actionTarget);
+                },
+              }]
+            : []),
+        ]}
+      />
+
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   searchWrap: {
     flexDirection: 'row',

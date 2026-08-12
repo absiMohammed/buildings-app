@@ -6,7 +6,8 @@ import { validate } from '../middleware/validate.js';
 import { requireBuildingAdmin, type AuthedRequest } from '../middleware/auth.js';
 import { Expense } from '../models/Expense.js';
 import { Unit } from '../models/Unit.js';
-import { Payment } from '../models/Payment.js';
+import { Payment, type PaymentDoc } from '../models/Payment.js';
+import { applyCreditToCharge } from '../services/payments.service.js';
 import { BadRequest, NotFound } from '../utils/errors.js';
 
 export const router = Router();
@@ -153,7 +154,15 @@ router.post(
       throw BadRequest(`splitMode "${expense.splitMode}" not implemented yet`);
     }
 
-    await Payment.insertMany(docs);
+    const created = await Payment.insertMany(docs);
+    // Cover freshly split charges from the unit owners' credit balances.
+    // (insertMany's return type is narrowed to the input docs' shape, so the
+    // hydrated documents need re-widening to PaymentDoc.)
+    const unitById = new Map(units.map((u) => [u._id.toString(), u]));
+    for (const p of created) {
+      const unit = unitById.get(p.unitId.toString());
+      if (unit) await applyCreditToCharge(p as unknown as PaymentDoc, unit);
+    }
     expense.splitGenerated = true;
     await expense.save();
 

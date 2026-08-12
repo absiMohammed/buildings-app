@@ -10,6 +10,7 @@
     "start": "node dist/server/src/index.js",
     "seed": "tsx src/scripts/seed.ts",
     "ensure-admin": "tsx src/scripts/ensureAdmin.ts",
+    "backfill-paid-amount": "tsx src/scripts/backfillPaidAmount.ts",
     "lint": "eslint \"src/**/*.ts\"",
     "test": "vitest run",
     "test:watch": "vitest"

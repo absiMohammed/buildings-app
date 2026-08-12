@@ -16,11 +16,11 @@ import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 
 const CURRENCY_OPTIONS = [
-  { code: 'ILS', label: '₪ Shekel (ILS)' },
-  { code: 'USD', label: '$ Dollar (USD)' },
-  { code: 'EUR', label: '€ Euro (EUR)' },
-  { code: 'GBP', label: '£ Pound (GBP)' },
-  { code: 'JOD', label: 'JD Dinar (JOD)' },
+  { code: 'ILS', labelKey: 'currency_ils' },
+  { code: 'USD', labelKey: 'currency_usd' },
+  { code: 'EUR', labelKey: 'currency_eur' },
+  { code: 'GBP', labelKey: 'currency_gbp' },
+  { code: 'JOD', labelKey: 'currency_jod' },
 ] as const;
 
 const ROLE_KEY: Record<Role, StringKey> = {
@@ -328,7 +328,7 @@ export function SettingsPage() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
-      <Text style={type.caption}>{t('settings_title').toUpperCase()}</Text>
+      <Text style={type.caption}>{t('settings_title')}</Text>
       <Text style={type.display}>{building?.name ?? '—'}</Text>
       <Text style={type.small}>{t('settings_subtitle')}</Text>
 
@@ -612,7 +612,7 @@ export function SettingsPage() {
                   activeOpacity={0.85}
                   style={[styles.row, i < CURRENCY_OPTIONS.length - 1 && styles.rowDivider]}
                 >
-                  <Text style={[type.body, { flex: 1 }]}>{opt.label}</Text>
+                  <Text style={[type.body, { flex: 1 }]}>{t(opt.labelKey)}</Text>
                   {active ? <Pill label={t('settings_current')} tone="positive" /> : loading ? <Text style={type.small}>{t('saving')}</Text> : <Text style={type.small}>{t('settings_set')}</Text>}
                 </TouchableOpacity>
               );
@@ -700,7 +700,7 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.lg, paddingVertical: spacing.md, gap: spacing.md },
   rowDivider: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.divider },
   langRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.lg, paddingVertical: spacing.md, gap: spacing.md },

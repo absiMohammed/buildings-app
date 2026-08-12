@@ -19,6 +19,7 @@ import { apiErrorMessage, useApiResource } from '../api/useApiResource';
 import { NewTicketModal } from '../components/NewTicketModal';
 import { useConfirm } from '../components/ConfirmProvider';
 import { TAB_BAR_HEIGHT } from '../components/BottomTabBar';
+import { ActionSheet } from '../components/ActionSheet';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
 
@@ -58,13 +59,13 @@ const CATEGORY_KEY: Record<MaintenanceCategory, StringKey> = {
   electrical: 'tcat_electrical',
   elevator: 'qa_elevator_title',
   common_area: 'maint_place_common',
-  other: 'sub_method_other',
+  other: 'tcat_other',
 };
 
 // Server has four priorities; the strings file has three labels, so 'urgent'
 // borrows the 'high' label (no dedicated key, and it shares the danger tone).
 const PRIORITY_KEY: Record<MaintenancePriority, StringKey> = {
-  urgent: 'maint_priority_high',
+  urgent: 'maint_priority_urgent',
   high: 'maint_priority_high',
   normal: 'maint_priority_medium',
   low: 'maint_priority_low',
@@ -80,12 +81,13 @@ export function MaintenancePage() {
   const canCreate = hasAction(caps, ACTIONS.TICKET_CREATE);
   const canResolve = hasAction(caps, ACTIONS.TICKET_RESOLVE);
   const [reportOpen, setReportOpen] = useState(false);
+  const [statusTarget, setStatusTarget] = useState<MaintenanceRequest | null>(null);
   const { t, tf } = useI18n();
   const { confirm } = useConfirm();
 
   const { data, loading, refreshing, error, refresh, reload } = useApiResource(
     listMaintenance,
-    'Could not load maintenance requests.',
+    t('maint_err_load'),
   );
 
   const tickets = useMemo(() => data ?? [], [data]);
@@ -114,24 +116,20 @@ export function MaintenancePage() {
       await updateMaintenance(ticket._id, { status });
       await reload();
     } catch (e) {
-      await confirm({ title: ticket.title, message: apiErrorMessage(e, 'Could not update ticket.') });
+      await confirm({ title: ticket.title, message: apiErrorMessage(e, t('maint_err_update')) });
     }
   }
 
-  async function changeStatus(ticket: MaintenanceRequest) {
-    const opts: { text: string; status: MaintenanceStatus }[] = [];
-    if (ticket.status !== 'in_progress') opts.push({ text: t('maint_status_in_progress'), status: 'in_progress' });
-    if (ticket.status !== 'resolved') opts.push({ text: t('maint_status_resolved'), status: 'resolved' });
-    if (ticket.status === 'resolved') opts.push({ text: t('ticket_closed'), status: 'closed' });
+  // One sheet, all valid next statuses — never a chain of confirm dialogs.
+  function statusItems(ticket: MaintenanceRequest): { label: string; status: MaintenanceStatus }[] {
+    const opts: { label: string; status: MaintenanceStatus }[] = [];
+    if (ticket.status !== 'in_progress') opts.push({ label: t('maint_status_in_progress'), status: 'in_progress' });
+    if (ticket.status !== 'resolved') opts.push({ label: t('maint_status_resolved'), status: 'resolved' });
+    if (ticket.status === 'resolved') opts.push({ label: t('ticket_closed'), status: 'closed' });
     if (ticket.status === 'resolved' || ticket.status === 'closed') {
-      opts.push({ text: t('maint_status_reopen'), status: 'open' });
+      opts.push({ label: t('maint_status_reopen'), status: 'open' });
     }
-    for (const o of opts) {
-      if (await confirm({ title: ticket.title, message: t('maint_status_alert_body'), confirmLabel: o.text })) {
-        await applyStatus(ticket, o.status);
-        return;
-      }
-    }
+    return opts;
   }
 
   function reportPressed() {
@@ -153,7 +151,7 @@ export function MaintenancePage() {
         <EmptyState
           iconName="maintenance"
           title={error}
-          action={{ label: t('back'), onPress: () => void refresh() }}
+          action={{ label: t('retry'), onPress: () => void refresh() }}
         />
       </View>
     );
@@ -186,7 +184,7 @@ export function MaintenancePage() {
                         <Button
                           label={t('update_status')}
                           variant="secondary"
-                          onPress={() => void changeStatus(ticket)}
+                          onPress={() => setStatusTarget(ticket)}
                           style={{ flex: 1 }}
                         />
                       </View>
@@ -211,7 +209,7 @@ export function MaintenancePage() {
                           <Button
                             label={t('update_status')}
                             variant="secondary"
-                            onPress={() => void changeStatus(ticket)}
+                            onPress={() => setStatusTarget(ticket)}
                             style={{ flex: 1 }}
                           />
                         </View>
@@ -254,6 +252,17 @@ export function MaintenancePage() {
           <Text style={styles.fabLabel}>{t('new_report_label')}</Text>
         </TouchableOpacity>
       )}
+
+      <ActionSheet
+        open={!!statusTarget}
+        onClose={() => setStatusTarget(null)}
+        title={statusTarget?.title ?? ''}
+        subtitle={t('update_status')}
+        items={(statusTarget ? statusItems(statusTarget) : []).map((o) => ({
+          label: o.label,
+          onPress: () => void applyStatus(statusTarget!, o.status),
+        }))}
+      />
 
       <NewTicketModal
         open={reportOpen}
@@ -307,7 +316,7 @@ function TicketCard({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   row: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   metaRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },

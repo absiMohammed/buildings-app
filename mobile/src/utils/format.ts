@@ -34,6 +34,32 @@ export function setFormatLocale(locale: 'en' | 'ar'): void {
   formatLocale = locale;
 }
 
+/**
+ * The app-wide date formatter — every user-visible date goes through here
+ * (never raw `toLocaleDateString()`: that follows the DEVICE locale, not the
+ * app language, and ISO `.slice(0, 10)` is not a date).
+ */
+export function fmtDate(iso: string | Date): string {
+  return new Date(iso).toLocaleDateString(formatLocale === 'ar' ? 'ar' : 'en-US', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+}
+
+/** Long-form date for headers/hero ("١٢ أغسطس" / "August 12"). */
+export function fmtDateLong(iso: string | Date): string {
+  return new Date(iso).toLocaleDateString(formatLocale === 'ar' ? 'ar' : 'en-US', {
+    month: 'long',
+    day: 'numeric',
+  });
+}
+
+/** Short month name for chart axes, in the app language. */
+export function fmtMonthShort(date: Date): string {
+  return date.toLocaleDateString(formatLocale === 'ar' ? 'ar' : 'en-US', { month: 'short' });
+}
+
 export function relativeDay(iso: string): string {
   const diff = Math.round((new Date(iso).getTime() - Date.now()) / dayMs);
   if (formatLocale === 'ar') {

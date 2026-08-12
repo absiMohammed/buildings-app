@@ -9,9 +9,9 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { COUNTRIES, type Country } from '../data/countries';
+import { COUNTRIES, countryName, type Country } from '../data/countries';
 import { palette, radii, spacing, type } from './theme';
-import { useT } from '../i18n';
+import { useI18n } from '../i18n';
 
 export function CountryPicker({
   visible,
@@ -24,7 +24,7 @@ export function CountryPicker({
   onSelect: (c: Country) => void;
   onClose: () => void;
 }) {
-  const t = useT();
+  const { t, locale } = useI18n();
   const insets = useSafeAreaInsets();
   const [query, setQuery] = useState('');
 
@@ -34,10 +34,11 @@ export function CountryPicker({
     return COUNTRIES.filter(
       (c) =>
         c.name.toLowerCase().includes(q) ||
+        countryName(c, locale).includes(query.trim()) ||
         c.dial.includes(q) ||
         c.iso.toLowerCase().includes(q),
     );
-  }, [query]);
+  }, [query, locale]);
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose} transparent={false} statusBarTranslucent>
@@ -72,7 +73,7 @@ export function CountryPicker({
               activeOpacity={0.7}
             >
               <Text style={styles.flag}>{item.flag}</Text>
-              <Text style={styles.name}>{item.name}</Text>
+              <Text style={styles.name}>{countryName(item, locale)}</Text>
               <Text style={styles.dial}>{item.dial}</Text>
             </TouchableOpacity>
           )}

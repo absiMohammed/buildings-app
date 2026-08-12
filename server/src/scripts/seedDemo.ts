@@ -4,6 +4,7 @@ import { Building } from '../models/Building.js';
 import { Unit } from '../models/Unit.js';
 import { User } from '../models/User.js';
 import { Payment } from '../models/Payment.js';
+import { UserCredit } from '../models/UserCredit.js';
 import { Expense } from '../models/Expense.js';
 import { Poll } from '../models/Poll.js';
 import { Vote } from '../models/Vote.js';
@@ -78,6 +79,7 @@ async function main(): Promise<void> {
   // ---- Wipe previous demo state -----------------------------------------
   await Promise.all([
     Payment.deleteMany({ buildingId: bid }),
+    UserCredit.deleteMany({ buildingId: bid }),
     Expense.deleteMany({ buildingId: bid }),
     Vote.deleteMany({ pollId: { $in: (await Poll.find({ buildingId: bid }).select('_id')).map((p) => p._id) } }),
     MaintenanceRequest.deleteMany({ buildingId: bid }),
@@ -116,7 +118,16 @@ async function main(): Promise<void> {
   // ---- Residents ----------------------------------------------------------
   const passwordHash = await hashPassword(DEMO_PASSWORD);
   let phoneSeq = 100;
-  const nextPhone = () => `+9705992${String(phoneSeq++).padStart(5, '0')}`;
+  // Sequential numbers, skipping any already taken — seeding a SECOND
+  // building must not collide with the first one's residents. Re-runs of the
+  // same building free their numbers first (users wiped above), so the same
+  // building always gets the same phones back.
+  const nextPhone = async () => {
+    for (;;) {
+      const candidate = `+9705992${String(phoneSeq++).padStart(5, '0')}`;
+      if (!(await User.exists({ phone: candidate }))) return candidate;
+    }
+  };
 
   interface Resident { id: Types.ObjectId; unit: Types.ObjectId; role: string }
   const residents: Resident[] = [];
@@ -128,7 +139,7 @@ async function main(): Promise<void> {
     linkedOwnerId: Types.ObjectId | null = null,
   ) {
     const u = await User.create({
-      phone: nextPhone(),
+      phone: await nextPhone(),
       passwordHash,
       firstName,
       lastName,
@@ -176,13 +187,29 @@ async function main(): Promise<void> {
         currency: building.currency,
         dueDate: due,
         status,
+        // Unit #3's overdue month arrives half-covered so the demo shows a
+        // partial payment (receipt history + remaining balance).
         ...(status === 'paid'
           ? {
               paidAt: new Date(due.getTime() + (2 + ui) * 86_400_000),
               paidBy: ownerId,
               paymentMethod: ui % 2 ? 'cash' : 'transfer',
+              paidAmount: dues,
             }
-          : {}),
+          : ui === 2 && m === 1
+            ? {
+                paidAmount: Math.round(dues / 2),
+                receipts: [
+                  {
+                    amount: Math.round(dues / 2),
+                    at: new Date(due.getTime() + 5 * 86_400_000),
+                    method: 'cash',
+                    recordedBy: adminId,
+                    payerId: ownerId,
+                  },
+                ],
+              }
+            : { paidAmount: 0 }),
         notes: '',
       });
     }
@@ -201,6 +228,18 @@ async function main(): Promise<void> {
     });
   }
   await Payment.insertMany(paymentsBatch);
+
+  // A small prepaid credit for the first owner so the balance auto-apply
+  // is visible on the next dues run.
+  const firstOwner = residents.find((r) => r.role === 'owner');
+  if (firstOwner) {
+    await UserCredit.create({
+      userId: firstOwner.id,
+      buildingId: bid,
+      balance: 120,
+      currency: building.currency,
+    });
+  }
 
   // ---- Expenses ------------------------------------------------------------
   await Expense.insertMany(

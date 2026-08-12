@@ -3,13 +3,16 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
 import { fmtMoney, relativeDay } from '../utils/format';
-import type { Payment } from '../api/payments';
+import { paymentTypeLabel } from '../utils/labels';
+import { remainingOf, isPartiallyPaid, type Payment } from '../api/payments';
 import { palette, radii, spacing, type } from './theme';
 import { Button } from './ui';
+import { AmountInput, parseAmount } from './AmountInput';
 import { BottomSheet } from './BottomSheet';
 import { useI18n } from '../i18n';
 import type { StringKey } from '../i18n/strings';
@@ -21,14 +24,21 @@ const PSTATUS_KEY: Record<Payment['status'], StringKey> = {
   waived: 'status_waived',
 };
 
-// Reuse existing dues label where it maps; otherwise prettify the raw type.
-function paymentTypeLabel(pt: Payment['type'], t: ReturnType<typeof useI18n>['t']): string {
-  if (pt === 'monthly_dues') return t('ptype_building_dues');
-  if (pt === 'rent') return t('ptype_rent');
-  return pt
-    .split('_')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
+const round2 = (x: number) => Math.round(x * 100) / 100;
+
+/**
+ * Client mirror of the server waterfall (payments.service.ts planWaterfall):
+ * oldest-first, each slice capped at that charge's remaining. Must stay
+ * identical — the server response is the source of truth, this only previews.
+ */
+function planWaterfall(remainings: number[], amount: number): { applied: number[]; surplus: number } {
+  let left = round2(amount);
+  const applied = remainings.map((remaining) => {
+    const slice = round2(Math.min(Math.max(remaining, 0), left));
+    left = round2(left - slice);
+    return slice;
+  });
+  return { applied, surplus: left };
 }
 
 export interface RecordPaymentModalProps {
@@ -41,7 +51,9 @@ export interface RecordPaymentModalProps {
   // When set, the user can't change which payment(s) are being marked paid.
   // Used by the per-row action on the Payments page.
   lockedPaymentIds?: string[];
-  onSubmit: (input: { selectedIds: string[] }) => void;
+  /** Disables + spins the save button while the receipt is being recorded. */
+  submitting?: boolean;
+  onSubmit: (input: { paymentIds: string[]; amount: number; note: string }) => void;
 }
 
 export function RecordPaymentModal({
@@ -51,6 +63,7 @@ export function RecordPaymentModal({
   currency,
   openPayments,
   lockedPaymentIds,
+  submitting,
   onSubmit,
 }: RecordPaymentModalProps) {
   const sorted = useMemo(
@@ -61,10 +74,16 @@ export function RecordPaymentModal({
   const isLocked = !!(lockedPaymentIds && lockedPaymentIds.length > 0);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [amountText, setAmountText] = useState('');
+  const [amountDirty, setAmountDirty] = useState(false);
+  const [note, setNote] = useState('');
   const { t, tf } = useI18n();
 
   useEffect(() => {
     if (!open) return;
+    setAmountText('');
+    setAmountDirty(false);
+    setNote('');
     if (isLocked) {
       setSelected(new Set(lockedPaymentIds));
     } else {
@@ -74,8 +93,18 @@ export function RecordPaymentModal({
   }, [open, isLocked, lockedPaymentIds, sorted]);
 
   const selectedPayments = sorted.filter((p) => selected.has(p._id));
-  const selectedTotal = selectedPayments.reduce((s, p) => s + p.amount, 0);
-  const valid = selected.size > 0;
+  const selectedTotal = round2(selectedPayments.reduce((s, p) => s + remainingOf(p), 0));
+
+  // Until the user types, the amount tracks the selection (full settle).
+  useEffect(() => {
+    if (!amountDirty) setAmountText(selectedTotal > 0 ? String(selectedTotal) : '');
+  }, [selectedTotal, amountDirty]);
+
+  const amount = parseAmount(amountText) ?? 0;
+  const { applied, surplus } = planWaterfall(selectedPayments.map(remainingOf), amount);
+  const appliedById = new Map(selectedPayments.map((p, i) => [p._id, applied[i] ?? 0]));
+  const shortBy = round2(selectedTotal - (amount - surplus));
+  const valid = selected.size > 0 && amount > 0;
 
   function toggle(id: string) {
     if (isLocked) return;
@@ -99,6 +128,29 @@ export function RecordPaymentModal({
             : tf('record_payment_open_body', { n: unitNumber })}
         </Text>
 
+        <View style={styles.amountHeader}>
+          <Text style={styles.label}>{t('record_payment_amount')}</Text>
+          {selectedTotal > 0 && amount !== selectedTotal && (
+            <TouchableOpacity
+              onPress={() => {
+                setAmountText(String(selectedTotal));
+                setAmountDirty(true);
+              }}
+            >
+              <Text style={styles.toggleAll}>{fmtMoney(selectedTotal, currency)}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        <AmountInput
+          value={amountText}
+          onChangeValue={(v) => {
+            setAmountText(v);
+            setAmountDirty(true);
+          }}
+          currency={currency}
+          placeholder={t('record_payment_amount_ph')}
+        />
+
         {sorted.length > 0 && (
           <>
             <View style={styles.listHeader}>
@@ -119,6 +171,8 @@ export function RecordPaymentModal({
               {sorted.map((p) => {
                 const checked = selected.has(p._id);
                 const lockedRow = isLocked && lockedPaymentIds!.includes(p._id);
+                const slice = appliedById.get(p._id) ?? 0;
+                const remaining = remainingOf(p);
                 return (
                   <TouchableOpacity
                     key={p._id}
@@ -131,12 +185,23 @@ export function RecordPaymentModal({
                       {checked && <Text style={styles.checkmark}>✓</Text>}
                     </View>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.dueType}>{paymentTypeLabel(p.type, t)}</Text>
+                      <Text style={styles.dueType}>{paymentTypeLabel(t, p.type)}</Text>
                       <Text style={styles.dueMeta}>
                         {tf('record_payment_due_status', { relative: relativeDay(p.dueDate), status: t(PSTATUS_KEY[p.status]) })}
+                        {isPartiallyPaid(p)
+                          ? ` · ${tf('record_payment_paid_inline', { amount: fmtMoney(p.paidAmount, currency) })}`
+                          : ''}
                       </Text>
                     </View>
-                    <Text style={styles.dueOwed}>{fmtMoney(p.amount, currency)}</Text>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={styles.dueOwed}>{fmtMoney(remaining, currency)}</Text>
+                      {/* Waterfall preview: what this receipt covers of the row. */}
+                      {checked && amount > 0 && slice < remaining && (
+                        <Text style={styles.dueSlice}>
+                          {tf('record_payment_paid_inline', { amount: fmtMoney(slice, currency) })}
+                        </Text>
+                      )}
+                    </View>
                   </TouchableOpacity>
                 );
               })}
@@ -144,12 +209,29 @@ export function RecordPaymentModal({
           </>
         )}
 
+        <Text style={styles.label}>{t('record_payment_note')}</Text>
+        <TextInput
+          value={note}
+          onChangeText={setNote}
+          placeholder={t('record_payment_note_ph')}
+          placeholderTextColor={palette.textSubtle}
+          style={styles.noteInput}
+        />
+
         <View style={styles.summary}>
           <Text style={styles.summaryRow}>
             {tf('record_payment_selected_total', { amount: fmtMoney(selectedTotal, currency) })}
           </Text>
-          {valid && (
-            <Text style={styles.summaryRow}>{t('record_payment_will_settle')}</Text>
+          {valid && shortBy <= 0 && (
+            <Text style={styles.summaryRow}>
+              {t('record_payment_will_settle')}
+              {surplus > 0 ? tf('record_payment_to_balance_inline', { amount: fmtMoney(surplus, currency) }) : ''}
+            </Text>
+          )}
+          {valid && shortBy > 0 && (
+            <Text style={[styles.summaryRow, styles.summaryWarn]}>
+              {tf('record_payment_short_by', { amount: fmtMoney(shortBy, currency) })}
+            </Text>
           )}
         </View>
 
@@ -157,8 +239,9 @@ export function RecordPaymentModal({
           <Button label={t('cancel')} variant="secondary" onPress={onClose} style={{ flex: 1 }} />
           <Button
             label={t('record_payment_save')}
-            onPress={() => onSubmit({ selectedIds: Array.from(selected) })}
+            onPress={() => onSubmit({ paymentIds: Array.from(selected), amount, note })}
             disabled={!valid}
+            loading={submitting}
             style={{ flex: 1 }}
           />
         </View>
@@ -169,9 +252,10 @@ export function RecordPaymentModal({
 
 const styles = StyleSheet.create({
   label: { ...type.small, color: palette.textMuted, marginTop: spacing.md, marginBottom: 4 },
+  amountHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   listHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   toggleAll: { color: palette.accent, fontSize: 12, fontWeight: '600', marginTop: spacing.md },
-  dueList: { maxHeight: 240, marginTop: 4 },
+  dueList: { maxHeight: 200, marginTop: 4 },
   dueRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -195,9 +279,21 @@ const styles = StyleSheet.create({
   },
   checkboxOn: { backgroundColor: palette.accent, borderColor: palette.accent },
   checkmark: { color: '#fff', fontSize: 13, fontWeight: '900' },
-  dueType: { fontSize: 14, color: palette.text, fontWeight: '600', textTransform: 'capitalize' },
-  dueMeta: { fontSize: 11, color: palette.textSubtle, marginTop: 2, textTransform: 'capitalize' },
+  dueType: { fontSize: 14, color: palette.text, fontWeight: '600' },
+  dueMeta: { fontSize: 11, color: palette.textSubtle, marginTop: 2 },
   dueOwed: { fontSize: 14, color: palette.text, fontWeight: '700' },
+  dueSlice: { fontSize: 11, color: palette.accent, fontWeight: '600', marginTop: 2 },
+
+  noteInput: {
+    borderWidth: 1,
+    borderColor: palette.inputBorder,
+    borderRadius: radii.md,
+    backgroundColor: palette.surface,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: palette.text,
+  },
 
   summary: {
     marginTop: spacing.md,
@@ -206,6 +302,7 @@ const styles = StyleSheet.create({
     borderRadius: radii.md,
   },
   summaryRow: { fontSize: 13, color: palette.textMuted, marginTop: 2 },
+  summaryWarn: { color: palette.warning, fontWeight: '600' },
 
   actions: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.lg },
 });

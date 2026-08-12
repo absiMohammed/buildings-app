@@ -22,9 +22,9 @@ import {
   type ExpenseCategory,
 } from '../api/expenses';
 import { apiErrorMessage, useApiResource } from '../api/useApiResource';
-import { fmtMoney, fmtMoneyCompact, relativeDay } from '../utils/format';
+import { fmtMoney, fmtMoneyCompact, fmtMonthShort, relativeDay } from '../utils/format';
+import { expenseCategoryLabel } from '../utils/labels';
 import { useI18n } from '../i18n';
-import type { StringKey } from '../i18n/strings';
 
 const categoryIcon: Record<ExpenseCategory, IconName> = {
   maintenance: 'maintenance',
@@ -46,20 +46,6 @@ const CATEGORIES: ExpenseCategory[] = [
   'other',
 ];
 
-// Only the categories that have i18n keys are mapped; 'repairs'/'other' fall
-// back to their (lowercase) id, which matches the style of the existing labels.
-const CATEGORY_KEY: Partial<Record<ExpenseCategory, StringKey>> = {
-  maintenance: 'cat_maintenance',
-  utilities: 'cat_utilities',
-  cleaning: 'cat_cleaning',
-  insurance: 'cat_insurance',
-};
-
-function catLabel(t: (k: StringKey) => string, cat: ExpenseCategory): string {
-  const key = CATEGORY_KEY[cat];
-  return key ? t(key) : cat;
-}
-
 /** Sum expense amounts into the last six calendar months (real data only). */
 function buildTrend(expenses: Expense[]): { value: number; label: string }[] {
   const now = new Date();
@@ -67,7 +53,7 @@ function buildTrend(expenses: Expense[]): { value: number; label: string }[] {
     const d = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1);
     return {
       key: `${d.getFullYear()}-${d.getMonth()}`,
-      label: d.toLocaleDateString('en-US', { month: 'short' }),
+      label: fmtMonthShort(d),
       value: 0,
     };
   });
@@ -89,7 +75,7 @@ export function ExpensesPage() {
   const fetcher = useCallback(() => listExpenses(), []);
   const { data, loading, refreshing, error, refresh, reload } = useApiResource(
     fetcher,
-    t('sub_err_load'),
+    t('expenses_err_load'),
   );
 
   // Any resident sees every building expense — no arbitrary slicing.
@@ -119,7 +105,7 @@ export function ExpensesPage() {
         <EmptyState
           iconName="expenses"
           title={error}
-          action={{ label: t('back'), onPress: () => void refresh() }}
+          action={{ label: t('retry'), onPress: () => void refresh() }}
         />
       </View>
     );
@@ -148,7 +134,7 @@ export function ExpensesPage() {
         </View>
 
         {expenses.length === 0 ? (
-          <EmptyState iconName="expenses" title={t('payments_empty_default')} />
+          <EmptyState iconName="expenses" title={t('expenses_empty')} />
         ) : (
           <>
             <Card>
@@ -178,7 +164,7 @@ export function ExpensesPage() {
                 <View key={cat}>
                   <View style={styles.catRow}>
                     <IconCircle iconName={categoryIcon[cat as ExpenseCategory]} tone="warning" size={36} />
-                    <Text style={[type.body, { flex: 1, fontWeight: '600' }]}>{catLabel(t, cat as ExpenseCategory)}</Text>
+                    <Text style={[type.body, { flex: 1, fontWeight: '600' }]}>{expenseCategoryLabel(t, cat as ExpenseCategory)}</Text>
                     <Text style={type.body}>{fmtMoneyCompact(amt, currency)}</Text>
                   </View>
                   {i < byCategory.length - 1 && <View style={styles.divider} />}
@@ -266,7 +252,7 @@ function NewExpenseModal({
       reset();
       onCreated();
     } catch (e) {
-      setErr(apiErrorMessage(e, t('sub_err_load')));
+      setErr(apiErrorMessage(e, t('expenses_err_create')));
     } finally {
       setSubmitting(false);
     }
@@ -315,7 +301,7 @@ function NewExpenseModal({
                 style={[modalStyles.chip, category === c && modalStyles.chipActive]}
                 activeOpacity={0.85}
               >
-                <Text style={[modalStyles.chipText, category === c && modalStyles.chipTextActive]}>{catLabel(t, c)}</Text>
+                <Text style={[modalStyles.chipText, category === c && modalStyles.chipTextActive]}>{expenseCategoryLabel(t, c)}</Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -333,7 +319,7 @@ function NewExpenseModal({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg },
   catRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
@@ -363,7 +349,7 @@ const modalStyles = StyleSheet.create({
     backgroundColor: palette.surfaceMuted,
   },
   chipActive: { backgroundColor: palette.accent, borderColor: palette.accent },
-  chipText: { fontSize: 12, color: palette.textMuted, textTransform: 'capitalize', fontWeight: '500' },
+  chipText: { fontSize: 12, color: palette.textMuted, fontWeight: '500' },
   chipTextActive: { color: '#fff', fontWeight: '600' },
   actions: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.lg },
 });

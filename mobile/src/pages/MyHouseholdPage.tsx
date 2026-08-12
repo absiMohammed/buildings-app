@@ -43,20 +43,18 @@ export function MyHouseholdPage() {
     );
   }
 
-  // No resident endpoint exposes the dependent roster, so the count shown to
-  // the renter is always 0 here — the roster itself lives behind the admin
-  // Users screen. The server still enforces `maxDependents` on POST /invites.
-  const knownDependents = 0;
-
+  // No resident endpoint exposes the dependent roster, so never show a fake
+  // "0 used" count — state the cap alone. The server still enforces
+  // `maxDependents` on POST /invites.
   const quotaCopy =
     dependentCap == null
       ? t('household_quota_unset')
-      : tf('household_quota', { used: knownDependents, cap: dependentCap });
+      : tf('household_quota_cap_only', { cap: dependentCap });
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
       <View style={styles.header}>
-        <Text style={type.caption}>{t('household_title').toUpperCase()}</Text>
+        <Text style={type.caption}>{t('household_title')}</Text>
         <Text style={type.display}>{myUnitNumber}</Text>
         <Text style={type.small}>{t('household_subtitle')}</Text>
       </View>
@@ -99,6 +97,6 @@ export function MyHouseholdPage() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: palette.bg },
-  scroll: { padding: spacing.lg, paddingBottom: 120 },
+  scroll: { padding: spacing.lg, paddingBottom: spacing.xl },
   header: { marginBottom: spacing.lg },
 });
