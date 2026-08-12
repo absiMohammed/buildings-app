@@ -58,6 +58,14 @@ const updateSchema = z.object({
       monthlyDuesDay: z.number().int().min(1).max(28).optional(),
       defaultMonthlyDues: z.number().min(0).optional(),
       timezone: z.string().min(1).max(60).optional(),
+      lateFee: z
+        .object({
+          gracePeriodDays: z.number().int().min(0).max(60).optional(),
+          flatAmount: z.number().min(0).optional(),
+          percent: z.number().min(0).max(100).optional(),
+          reminderEveryDays: z.number().int().min(1).max(90).optional(),
+        })
+        .optional(),
       geoCenter: z
         .object({
           lat: z.number().min(-90).max(90).nullable().optional(),
@@ -96,6 +104,11 @@ router.patch(
       if (body.settings.access) {
         const prev = (existing?.settings as { access?: Record<string, unknown> } | undefined)?.access ?? {};
         merged.access = { ...prev, ...body.settings.access };
+      }
+      // Same for lateFee — a partial update must not clobber siblings.
+      if (body.settings.lateFee) {
+        const prev = (existing?.settings as { lateFee?: Record<string, unknown> } | undefined)?.lateFee ?? {};
+        merged.lateFee = { ...prev, ...body.settings.lateFee };
       }
       updates.settings = merged;
     }

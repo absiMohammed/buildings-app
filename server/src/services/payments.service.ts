@@ -6,6 +6,7 @@ import { UserCredit } from '../models/UserCredit.js';
 import { Notification } from '../models/Notification.js';
 import { User } from '../models/User.js';
 import { sendWhatsApp } from './whatsapp.service.js';
+import { logger } from '../config/logger.js';
 import { BadRequest, Forbidden, Conflict, NotFound } from '../utils/errors.js';
 
 // Amounts are JS floats end-to-end; without rounding at every mutation,
@@ -313,15 +314,117 @@ export async function generateMonthlyDues(buildingId: string) {
   return { generated };
 }
 
+/**
+ * Daily dunning pass. Flips pending charges past the grace period to
+ * overdue, then per newly-overdue charge: notifies the derived payer
+ * (in-app + WhatsApp) with the REMAINING amount and, when the building
+ * configured a late fee, generates a one-off fee charge — exactly once per
+ * source charge (`lateFeeChargeId` is the idempotency key). Charges that
+ * stay overdue get re-reminded every `reminderEveryDays`.
+ *
+ * NOTE (production WhatsApp): outside Meta's 24h customer-service window
+ * only approved templates deliver — these free-form reminders work in
+ * dev/mock mode; template wiring is a separate task.
+ */
 export async function markOverduePayments(buildingId: string) {
   const building = await Building.findById(buildingId);
-  if (!building) return { marked: 0 };
-  const grace = building.settings?.lateFee?.gracePeriodDays ?? 0;
-  const cutoff = new Date();
+  if (!building) return { marked: 0, fees: 0, reminders: 0 };
+  const lateFee = building.settings?.lateFee;
+  const grace = lateFee?.gracePeriodDays ?? 0;
+  const reminderEveryDays = lateFee?.reminderEveryDays ?? 7;
+  const now = new Date();
+  const cutoff = new Date(now);
   cutoff.setDate(cutoff.getDate() - grace);
-  const res = await Payment.updateMany(
-    { buildingId, status: 'pending', dueDate: { $lt: cutoff } },
-    { status: 'overdue' }
-  );
-  return { marked: res.modifiedCount };
+
+  // 1. Find the rows about to flip so we can act on them individually
+  //    after the bulk status update.
+  const newlyOverdue = await Payment.find({
+    buildingId,
+    status: 'pending',
+    dueDate: { $lt: cutoff },
+  });
+  if (newlyOverdue.length > 0) {
+    await Payment.updateMany(
+      { _id: { $in: newlyOverdue.map((p) => p._id) } },
+      { status: 'overdue' }
+    );
+  }
+
+  // 2. Long-overdue rows whose last reminder is stale get another nudge.
+  const reminderCutoff = new Date(now.getTime() - reminderEveryDays * 86_400_000);
+  const staleOverdue = await Payment.find({
+    buildingId,
+    status: 'overdue',
+    _id: { $nin: newlyOverdue.map((p) => p._id) },
+    $or: [{ lastReminderAt: null }, { lastReminderAt: { $lt: reminderCutoff } }],
+  });
+
+  let fees = 0;
+  let reminders = 0;
+  const feeConfigured = (lateFee?.flatAmount ?? 0) > 0 || (lateFee?.percent ?? 0) > 0;
+
+  async function remind(payment: PaymentDoc, isFirst: boolean) {
+    const unit = await Unit.findById(payment.unitId);
+    if (!unit) return;
+    const payerId = await derivePayer(payment, unit);
+    const remaining = round2(payment.amount - payment.paidAmount);
+    if (payerId && remaining > 0) {
+      const payer = await User.findById(payerId).select('phone status');
+      const title = `Payment overdue — unit ${unit.number}`;
+      const body = `Remaining: ${payment.currency} ${remaining.toFixed(2)} (due ${payment.dueDate.toDateString()})`;
+      await Notification.create({
+        userId: payerId,
+        buildingId,
+        type: 'payment_overdue',
+        title,
+        body,
+        link: '/payments',
+      });
+      if (payer?.status === 'active') {
+        await sendWhatsApp(payer.phone, `${building!.name}: ${title}. ${body}`);
+      }
+      reminders++;
+    }
+
+    // Late fee: only on first flip, only when configured, exactly once.
+    if (isFirst && feeConfigured && !payment.lateFeeChargeId && remaining > 0) {
+      const feeAmount = round2(
+        (lateFee?.flatAmount ?? 0) + (remaining * (lateFee?.percent ?? 0)) / 100
+      );
+      if (feeAmount > 0) {
+        const fee = await Payment.create({
+          buildingId,
+          unitId: payment.unitId,
+          type: 'one_off',
+          amount: feeAmount,
+          currency: payment.currency,
+          dueDate: now,
+          status: 'pending',
+          notes: `Late fee for ${payment.type} due ${payment.dueDate.toISOString().slice(0, 10)}`,
+        });
+        payment.lateFeeChargeId = fee._id;
+        fees++;
+      }
+    }
+
+    payment.lastReminderAt = now;
+    await payment.save();
+  }
+
+  for (const p of newlyOverdue) {
+    try {
+      await remind(p, true);
+    } catch (err) {
+      logger.error({ err, paymentId: p._id }, 'dunning failed for newly-overdue charge');
+    }
+  }
+  for (const p of staleOverdue) {
+    try {
+      await remind(p, false);
+    } catch (err) {
+      logger.error({ err, paymentId: p._id }, 'dunning reminder failed');
+    }
+  }
+
+  return { marked: newlyOverdue.length, fees, reminders };
 }

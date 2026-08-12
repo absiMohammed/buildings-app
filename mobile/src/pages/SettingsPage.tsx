@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useAuth, useCurrency, type BuildingSummary, type Role } from '../auth/AuthContext';
 import { api } from '../api/client';
+import { apiErrorMessage } from '../api/useApiResource';
 import { runMonthlyDues } from '../api/payments';
 import { listUnits, type Unit } from '../api/units';
 import { getRefreshToken } from '../api/client';
@@ -75,6 +76,11 @@ export function SettingsPage() {
   const [savingDay, setSavingDay] = useState(false);
   const [amountDraft, setAmountDraft] = useState(String(building?.settings?.defaultMonthlyDues ?? 0));
   const [savingAmount, setSavingAmount] = useState(false);
+  const [graceDraft, setGraceDraft] = useState(String(building?.settings?.lateFee?.gracePeriodDays ?? 5));
+  const [feeFlatDraft, setFeeFlatDraft] = useState(String(building?.settings?.lateFee?.flatAmount ?? 0));
+  const [feePctDraft, setFeePctDraft] = useState(String(building?.settings?.lateFee?.percent ?? 0));
+  const [remindDraft, setRemindDraft] = useState(String(building?.settings?.lateFee?.reminderEveryDays ?? 7));
+  const [savingLateFee, setSavingLateFee] = useState(false);
   const [generatingDues, setGeneratingDues] = useState(false);
   const [projUnits, setProjUnits] = useState<Unit[]>([]);
   const accessInit = building?.settings?.access;
@@ -141,6 +147,13 @@ export function SettingsPage() {
   }, [building?.settings?.defaultMonthlyDues]);
 
   useEffect(() => {
+    setGraceDraft(String(building?.settings?.lateFee?.gracePeriodDays ?? 5));
+    setFeeFlatDraft(String(building?.settings?.lateFee?.flatAmount ?? 0));
+    setFeePctDraft(String(building?.settings?.lateFee?.percent ?? 0));
+    setRemindDraft(String(building?.settings?.lateFee?.reminderEveryDays ?? 7));
+  }, [building?.settings?.lateFee]);
+
+  useEffect(() => {
     setLatDraft(
       building?.settings?.geoCenter?.lat == null ? '' : String(building.settings.geoCenter.lat)
     );
@@ -190,6 +203,35 @@ export function SettingsPage() {
       setError(msg ?? t('settings_error_day_save_failed'));
     } finally {
       setSavingDay(false);
+    }
+  }
+
+  async function saveLateFee() {
+    const grace = parseInt(graceDraft, 10);
+    const flat = parseFloat(feeFlatDraft.replace(/,/g, ''));
+    const pct = parseFloat(feePctDraft.replace(/,/g, ''));
+    const remind = parseInt(remindDraft, 10);
+    if (
+      !Number.isFinite(grace) || grace < 0 || grace > 60 ||
+      !Number.isFinite(flat) || flat < 0 ||
+      !Number.isFinite(pct) || pct < 0 || pct > 100 ||
+      !Number.isFinite(remind) || remind < 1 || remind > 90
+    ) {
+      setError(t('settings_late_fee_invalid'));
+      return;
+    }
+    setSavingLateFee(true);
+    setError(null);
+    try {
+      const r = await api.patch('/buildings/me', {
+        settings: { lateFee: { gracePeriodDays: grace, flatAmount: flat, percent: pct, reminderEveryDays: remind } },
+      });
+      updateBuilding(r.data.building as BuildingSummary);
+      setSavedAt(Date.now());
+    } catch (e) {
+      setError(apiErrorMessage(e, t('err_generic')));
+    } finally {
+      setSavingLateFee(false);
     }
   }
 
@@ -491,6 +533,61 @@ export function SettingsPage() {
                 style={{ paddingHorizontal: 16 }}
               />
             </View>
+          </Card>
+
+          <Card>
+            <Text style={[type.body, { fontWeight: '700', marginBottom: 4 }]}>
+              {t('settings_late_fee_title')}
+            </Text>
+            <Text style={styles.fieldLabel}>{t('settings_late_fee_hint')}</Text>
+            <View style={styles.nameRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={type.small}>{t('settings_late_fee_grace')}</Text>
+                <TextInput
+                  value={graceDraft}
+                  onChangeText={setGraceDraft}
+                  keyboardType="number-pad"
+                  maxLength={2}
+                  style={styles.nameInput}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={type.small}>{t('settings_late_fee_reminder')}</Text>
+                <TextInput
+                  value={remindDraft}
+                  onChangeText={setRemindDraft}
+                  keyboardType="number-pad"
+                  maxLength={2}
+                  style={styles.nameInput}
+                />
+              </View>
+            </View>
+            <View style={[styles.nameRow, { marginTop: spacing.sm }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={type.small}>{t('settings_late_fee_flat')} ({currentCurrency})</Text>
+                <TextInput
+                  value={feeFlatDraft}
+                  onChangeText={setFeeFlatDraft}
+                  keyboardType="decimal-pad"
+                  style={styles.nameInput}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={type.small}>{t('settings_late_fee_percent')}</Text>
+                <TextInput
+                  value={feePctDraft}
+                  onChangeText={setFeePctDraft}
+                  keyboardType="decimal-pad"
+                  style={styles.nameInput}
+                />
+              </View>
+            </View>
+            <Button
+              label={savingLateFee ? t('saving') : t('save')}
+              onPress={saveLateFee}
+              loading={savingLateFee}
+              style={{ marginTop: spacing.md }}
+            />
           </Card>
 
           <Card>

@@ -45,7 +45,7 @@ export interface BuildingSummary {
     // Fallback used by any unit that doesn't set its own monthlyDue.
     defaultMonthlyDues?: number;
     timezone?: string;
-    lateFee?: { gracePeriodDays?: number; flatAmount?: number; percent?: number };
+    lateFee?: { gracePeriodDays?: number; flatAmount?: number; percent?: number; reminderEveryDays?: number };
     // Anchor for per-user geo-fences. Per-user UserSettings only stores
     // radiusMeters + allowedActions; the center is read from here.
     geoCenter?: { lat?: number | null; lng?: number | null };

@@ -47,6 +47,10 @@ const PaymentSchema = new Schema(
     paymentMethod: { type: String, enum: METHODS, default: null },
     externalRef: { type: String, default: '' },
     expenseId: { type: Schema.Types.ObjectId, ref: 'Expense', default: null },
+    // Dunning bookkeeping. lateFeeChargeId doubles as the idempotency key
+    // ("one late fee per charge"); lastReminderAt paces repeat reminders.
+    lateFeeChargeId: { type: Schema.Types.ObjectId, ref: 'Payment', default: null },
+    lastReminderAt: { type: Date, default: null },
     notes: { type: String, default: '' },
   },
   // optimisticConcurrency: two admins recording receipts on the same charge

@@ -47,10 +47,15 @@ const BuildingSchema = new Schema(
       monthlyDuesDay: { type: Number, default: 1, min: 1, max: 28 },
       // Building-wide fallback for units that don't set their own amount.
       defaultMonthlyDues: { type: Number, default: 0, min: 0 },
+      // Overdue policy: after gracePeriodDays a pending charge flips to
+      // overdue, the payer is notified, and (when flatAmount/percent > 0)
+      // a one-off late-fee charge is generated once per source charge.
+      // Reminders repeat every reminderEveryDays while it stays overdue.
       lateFee: {
         gracePeriodDays: { type: Number, default: 5, min: 0 },
         flatAmount: { type: Number, default: 0, min: 0 },
         percent: { type: Number, default: 0, min: 0, max: 100 },
+        reminderEveryDays: { type: Number, default: 7, min: 1, max: 90 },
       },
       timezone: { type: String, default: 'UTC' },
       // Anchor for per-user geo-fence radii. Each user's fence is computed
